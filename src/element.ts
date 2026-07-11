@@ -180,6 +180,24 @@ export class ManekiWidgetElement extends HTMLElement {
     const gatewayUrl = this.getAttribute("gateway-url")!;
 
     this.errorMessage = null;
+
+    // getUserMedia only exists in a secure context — HTTPS, or the literal
+    // hostnames localhost/127.0.0.1. On any other plain-HTTP origin
+    // navigator.mediaDevices is undefined and mic capture is impossible;
+    // no token or room-join can salvage that. A production embed is always
+    // HTTPS, so this only bites local plain-HTTP testing — but detecting it
+    // here turns an otherwise-cryptic deep-in-livekit-client crash
+    // ("Cannot read properties of undefined (reading 'getUserMedia')")
+    // into a clear, actionable message.
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.error(
+        "<maneki-widget> no getUserMedia — this origin is not a secure context (needs HTTPS or localhost)."
+      );
+      this.errorMessage = "Voice needs a secure (HTTPS) connection.";
+      this.setState("error");
+      return;
+    }
+
     this.setState("connecting");
     try {
       const sessionId = getOrCreateSessionId();

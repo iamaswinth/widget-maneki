@@ -60,6 +60,14 @@ beforeEach(() => {
   mockConnectToRoom.mockReset();
   mockHandleNavigate.mockReset();
   window.sessionStorage.clear();
+  // jsdom leaves navigator.mediaDevices undefined; the widget's secure-context
+  // guard checks for it before connecting, so stub a getUserMedia here to
+  // represent the normal (secure-context) case. The "insecure context"
+  // describe block below removes it to exercise the guard.
+  Object.defineProperty(navigator, "mediaDevices", {
+    value: { getUserMedia: () => Promise.resolve({}) },
+    configurable: true,
+  });
 });
 
 describe("tap-to-talk orchestration", () => {
@@ -270,6 +278,21 @@ describe("cross-page session resume", () => {
 });
 
 describe("error and edge states", () => {
+  it("shows a secure-context message and never requests a token on an insecure origin", async () => {
+    // Simulate a plain-HTTP (non-localhost) origin where the browser omits
+    // navigator.mediaDevices entirely.
+    Object.defineProperty(navigator, "mediaDevices", { value: undefined, configurable: true });
+
+    const el = mountWidget();
+    click(el);
+
+    await vi.waitFor(() => expect(el.state).toBe("error"));
+    expect(label(el)).toMatch(/secure|https/i);
+    // Guarded before any network call — no point issuing a token for a
+    // session that can never capture audio.
+    expect(mockRequestWidgetToken).not.toHaveBeenCalled();
+  });
+
   it("hides the widget entirely on a 403 (unpublished tenant / Origin mismatch)", async () => {
     mockRequestWidgetToken.mockRejectedValue(new FakeWidgetTokenError(403, "Origin not allowed"));
 
