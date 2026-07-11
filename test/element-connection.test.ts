@@ -21,8 +21,14 @@ vi.mock("../src/livekit-connection", () => ({
   connectToRoom: (...args: unknown[]) => mockConnectToRoom(...args),
 }));
 
+const mockHandleNavigate = vi.hoisted(() => vi.fn());
+vi.mock("../src/navigation", () => ({
+  handleNavigate: (...args: unknown[]) => mockHandleNavigate(...args),
+}));
+
 import "../src/index";
 import type { ManekiWidgetElement } from "../src/element";
+import type { DataMessageHandler } from "../src/livekit-connection";
 
 function mountWidget(): ManekiWidgetElement {
   const el = document.createElement("maneki-widget") as ManekiWidgetElement;
@@ -40,6 +46,7 @@ beforeEach(() => {
   document.body.innerHTML = "";
   mockRequestWidgetToken.mockReset();
   mockConnectToRoom.mockReset();
+  mockHandleNavigate.mockReset();
   window.sessionStorage.clear();
 });
 
@@ -66,7 +73,12 @@ describe("tap-to-talk orchestration", () => {
       "https://gateway.example.com",
       expect.objectContaining({ siteId: "acme" })
     );
-    expect(mockConnectToRoom).toHaveBeenCalledWith("wss://lk.example.com", "jwt", expect.any(Function));
+    expect(mockConnectToRoom).toHaveBeenCalledWith(
+      "wss://lk.example.com",
+      "jwt",
+      expect.any(Function),
+      expect.any(Function)
+    );
   });
 
   it("transitions to speaking when the remote audio callback fires", async () => {
@@ -153,5 +165,50 @@ describe("tap-to-talk orchestration", () => {
     await vi.waitFor(() => expect(el.state).toBe("listening"));
 
     expect(mockRequestWidgetToken).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("data-channel message dispatch", () => {
+  async function connectAndCaptureDataHandler(): Promise<{
+    el: ManekiWidgetElement;
+    onDataMessage: DataMessageHandler;
+  }> {
+    mockRequestWidgetToken.mockResolvedValue({
+      token: "jwt",
+      livekit_url: "wss://lk.example.com",
+      room: "room-1",
+    });
+    let onDataMessage!: DataMessageHandler;
+    mockConnectToRoom.mockImplementation(async (_url: string, _token: string, _onRemoteAudio, handler: DataMessageHandler) => {
+      onDataMessage = handler;
+      return { disconnect: vi.fn() };
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    return { el, onDataMessage };
+  }
+
+  it("routes a navigate message to handleNavigate with the target", async () => {
+    const { onDataMessage } = await connectAndCaptureDataHandler();
+
+    onDataMessage({ type: "navigate", target: "#pricing" });
+
+    expect(mockHandleNavigate).toHaveBeenCalledWith("#pricing");
+  });
+
+  it("ignores a navigate message with a non-string target rather than throwing", async () => {
+    const { onDataMessage } = await connectAndCaptureDataHandler();
+
+    expect(() => onDataMessage({ type: "navigate", target: 42 })).not.toThrow();
+    expect(mockHandleNavigate).not.toHaveBeenCalled();
+  });
+
+  it("does not throw on an unknown message type", async () => {
+    const { onDataMessage } = await connectAndCaptureDataHandler();
+
+    expect(() => onDataMessage({ type: "something-unexpected" })).not.toThrow();
+    expect(mockHandleNavigate).not.toHaveBeenCalled();
   });
 });

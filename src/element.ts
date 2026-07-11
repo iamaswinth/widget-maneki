@@ -1,5 +1,6 @@
 import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
-import { connectToRoom, LiveKitConnection } from "./livekit-connection";
+import { connectToRoom, DataMessage, LiveKitConnection } from "./livekit-connection";
+import { handleNavigate } from "./navigation";
 import { getOrCreateSessionId } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
 
@@ -152,16 +153,34 @@ export class ManekiWidgetElement extends HTMLElement {
         pageUrl: window.location.href,
       });
 
-      this.connection = await connectToRoom(livekitUrl, token, (audioEl) => {
-        this.audioContainer.appendChild(audioEl);
-        this.setState("speaking");
-      });
+      this.connection = await connectToRoom(
+        livekitUrl,
+        token,
+        (audioEl) => {
+          this.audioContainer.appendChild(audioEl);
+          this.setState("speaking");
+        },
+        (message) => this.handleDataMessage(message)
+      );
 
       this.setState("listening");
     } catch (err) {
       const status = err instanceof WidgetTokenError ? err.status : "unknown";
       console.error(`<maneki-widget> failed to connect (status=${status}):`, err);
       this.setState("error");
+    }
+  }
+
+  private handleDataMessage(message: DataMessage): void {
+    switch (message.type) {
+      case "navigate":
+        if (typeof message.target === "string") handleNavigate(message.target);
+        break;
+      case "interrupt":
+        // Visual feedback for barge-in is Session 5 scope — no-op for now.
+        break;
+      default:
+        console.warn("<maneki-widget> received an unknown data-channel message type:", message.type);
     }
   }
 
