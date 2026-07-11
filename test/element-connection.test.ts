@@ -22,11 +22,16 @@ vi.mock("../src/livekit-connection", () => ({
 }));
 
 const mockHandleNavigate = vi.hoisted(() => vi.fn());
-vi.mock("../src/navigation", () => ({
-  handleNavigate: (...args: unknown[]) => mockHandleNavigate(...args),
-}));
+vi.mock("../src/navigation", async (importOriginal) => {
+  // Only handleNavigate is mocked — PENDING_NAVIGATION_KEY must stay the
+  // real exported value, since element.ts's auto-resume check reads it
+  // directly (see element-resume tests below).
+  const actual = await importOriginal<typeof import("../src/navigation")>();
+  return { ...actual, handleNavigate: (...args: unknown[]) => mockHandleNavigate(...args) };
+});
 
 import "../src/index";
+import { PENDING_NAVIGATION_KEY } from "../src/navigation";
 import type { ManekiWidgetElement } from "../src/element";
 import type { DataMessageHandler } from "../src/livekit-connection";
 
@@ -210,5 +215,51 @@ describe("data-channel message dispatch", () => {
 
     expect(() => onDataMessage({ type: "something-unexpected" })).not.toThrow();
     expect(mockHandleNavigate).not.toHaveBeenCalled();
+  });
+});
+
+describe("cross-page session resume", () => {
+  it("auto-reconnects on mount when the pending-navigation flag is set", async () => {
+    window.sessionStorage.setItem("maneki_session_id", "sess-existing");
+    window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
+    mockRequestWidgetToken.mockResolvedValue({
+      token: "jwt",
+      livekit_url: "wss://lk.example.com",
+      room: "room-1",
+    });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+
+    const el = mountWidget();
+
+    // No click — mounting alone should have kicked off the connection.
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    expect(mockRequestWidgetToken).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ sessionId: "sess-existing" })
+    );
+  });
+
+  it("clears the pending-navigation flag so a later reload doesn't loop-reconnect", async () => {
+    window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
+    mockRequestWidgetToken.mockResolvedValue({
+      token: "jwt",
+      livekit_url: "wss://lk.example.com",
+      room: "room-1",
+    });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+
+    const el = mountWidget();
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(window.sessionStorage.getItem(PENDING_NAVIGATION_KEY)).toBeNull();
+  });
+
+  it("does not auto-connect on a normal mount with no pending-navigation flag", async () => {
+    const el = mountWidget();
+
+    // Give any stray microtask a chance to run, then confirm nothing fired.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(el.state).toBe("idle");
+    expect(mockRequestWidgetToken).not.toHaveBeenCalled();
   });
 });

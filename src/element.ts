@@ -1,6 +1,6 @@
 import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
 import { connectToRoom, DataMessage, LiveKitConnection } from "./livekit-connection";
-import { handleNavigate } from "./navigation";
+import { handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
 import { getOrCreateSessionId } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
 
@@ -118,6 +118,26 @@ export class ManekiWidgetElement extends HTMLElement {
 
     this.unsubscribe = this.stateMachine.subscribe((state) => this.render(state));
     this.render(this.stateMachine.state);
+
+    this.maybeAutoResume();
+  }
+
+  /** If the agent triggered a cross-page navigation last page load,
+   * navigation.ts marked this flag right before the location.href
+   * assignment. sessionStorage's session_id already survived the
+   * navigation on its own; this flag is what decides whether to
+   * immediately reconnect on it, rather than waiting for another tap —
+   * the visitor already opted in once, this page load is a continuation
+   * of that same conversation, not a fresh visit.
+   *
+   * Known limitation: browsers may still block audio autoplay here since
+   * a page load isn't a user gesture, even though mic-permission itself
+   * typically persists per-origin without a new prompt. Worth revisiting
+   * if it turns out to bite in practice — not addressed further here. */
+  private maybeAutoResume(): void {
+    if (window.sessionStorage.getItem(PENDING_NAVIGATION_KEY) !== "1") return;
+    window.sessionStorage.removeItem(PENDING_NAVIGATION_KEY);
+    void this.handleTapToTalk();
   }
 
   disconnectedCallback(): void {
