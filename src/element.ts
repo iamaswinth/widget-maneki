@@ -1,3 +1,4 @@
+import { isMicPermissionDenied } from "./errors";
 import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
 import { connectToRoom, DataMessage, LiveKitConnection } from "./livekit-connection";
 import { handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
@@ -19,6 +20,10 @@ const STATE_COLORS: Record<WidgetState, string> = {
   speaking: "#3b82f6",
   error: "#ef4444",
 };
+
+// How long to wait after joining the room for the agent to actually publish
+// an audio track before treating it as a dispatch failure.
+const DISPATCH_TIMEOUT_MS = 8000;
 
 const STYLE = `
   :host {
@@ -61,6 +66,8 @@ const STYLE = `
     background: rgba(255, 255, 255, 0.9);
     padding: 2px 8px;
     border-radius: 6px;
+    max-width: 220px;
+    text-align: center;
   }
 `;
 
@@ -80,6 +87,9 @@ export class ManekiWidgetElement extends HTMLElement {
   private labelEl!: HTMLSpanElement;
   private audioContainer!: HTMLDivElement;
   private connection: LiveKitConnection | null = null;
+  private errorMessage: string | null = null;
+  private dispatchTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempted = false;
 
   connectedCallback(): void {
     const siteId = this.getAttribute("site-id");
@@ -137,11 +147,13 @@ export class ManekiWidgetElement extends HTMLElement {
   private maybeAutoResume(): void {
     if (window.sessionStorage.getItem(PENDING_NAVIGATION_KEY) !== "1") return;
     window.sessionStorage.removeItem(PENDING_NAVIGATION_KEY);
-    void this.handleTapToTalk();
+    this.reconnectAttempted = false;
+    void this.attemptConnect();
   }
 
   disconnectedCallback(): void {
     this.unsubscribe?.();
+    this.clearDispatchTimeout();
     void this.connection?.disconnect();
   }
 
@@ -157,13 +169,17 @@ export class ManekiWidgetElement extends HTMLElement {
 
   protected async handleTapToTalk(): Promise<void> {
     // Only idle/error can start a connection — a tap while already
-    // connecting/listening/speaking is a no-op, not a reconnect or hangup
-    // (neither is specced yet; see Session 5 for richer interaction).
+    // connecting/listening/speaking is a no-op, not a reconnect or hangup.
     if (this.state !== "idle" && this.state !== "error") return;
+    this.reconnectAttempted = false;
+    await this.attemptConnect();
+  }
 
+  private async attemptConnect(): Promise<void> {
     const siteId = this.getAttribute("site-id")!;
     const gatewayUrl = this.getAttribute("gateway-url")!;
 
+    this.errorMessage = null;
     this.setState("connecting");
     try {
       const sessionId = getOrCreateSessionId();
@@ -173,21 +189,87 @@ export class ManekiWidgetElement extends HTMLElement {
         pageUrl: window.location.href,
       });
 
-      this.connection = await connectToRoom(
-        livekitUrl,
-        token,
-        (audioEl) => {
+      this.connection = await connectToRoom(livekitUrl, token, {
+        onRemoteAudio: (audioEl) => {
+          this.clearDispatchTimeout();
           this.audioContainer.appendChild(audioEl);
           this.setState("speaking");
         },
-        (message) => this.handleDataMessage(message)
-      );
+        onDataMessage: (message) => this.handleDataMessage(message),
+        onDisconnected: () => this.handleUnexpectedDisconnect(),
+      });
 
       this.setState("listening");
+      this.startDispatchTimeout();
     } catch (err) {
-      const status = err instanceof WidgetTokenError ? err.status : "unknown";
-      console.error(`<maneki-widget> failed to connect (status=${status}):`, err);
+      this.handleConnectError(err);
+    }
+  }
+
+  private handleConnectError(err: unknown): void {
+    if (err instanceof WidgetTokenError) {
+      if (err.status === 403) {
+        // Config problem on the owner's side (unpublished tenant, or an
+        // Origin that doesn't match what they configured) — no retry can
+        // fix this, so disappear entirely rather than show a broken state
+        // on their site.
+        console.error("<maneki-widget> 403 from the gateway — hiding (site not published or Origin mismatch).");
+        this.style.display = "none";
+        return;
+      }
+      if (err.status === 429) {
+        console.error("<maneki-widget> rate-limited by the gateway:", err);
+        this.errorMessage = "High demand right now — please try again in a moment.";
+        this.setState("error");
+        return;
+      }
+    }
+
+    if (isMicPermissionDenied(err)) {
+      this.errorMessage = "Microphone access is blocked — check your browser's site settings.";
       this.setState("error");
+      return;
+    }
+
+    console.error("<maneki-widget> failed to connect:", err);
+    this.errorMessage = null;
+    this.setState("error");
+  }
+
+  /** Fires only for a disconnect we didn't initiate ourselves (see
+   * livekit-connection.ts's intentionalDisconnect flag) — a real dropped
+   * connection. One silent reconnect attempt, reusing the same session_id
+   * so the conversation resumes rather than restarting; a second failure
+   * in a row gives up and shows a state the visitor can retry from. */
+  private handleUnexpectedDisconnect(): void {
+    this.clearDispatchTimeout();
+    this.connection = null;
+    if (this.reconnectAttempted) {
+      this.errorMessage = "Connection lost — tap to reconnect.";
+      this.setState("error");
+      return;
+    }
+    this.reconnectAttempted = true;
+    void this.attemptConnect();
+  }
+
+  private startDispatchTimeout(): void {
+    this.clearDispatchTimeout();
+    this.dispatchTimeoutId = setTimeout(() => {
+      this.dispatchTimeoutId = null;
+      // Only fire if still waiting — a track may have already arrived and
+      // moved us to "speaking", or the connection may have already dropped.
+      if (this.state === "listening") {
+        this.errorMessage = "The agent didn't join — please try again.";
+        this.setState("error");
+      }
+    }, DISPATCH_TIMEOUT_MS);
+  }
+
+  private clearDispatchTimeout(): void {
+    if (this.dispatchTimeoutId !== null) {
+      clearTimeout(this.dispatchTimeoutId);
+      this.dispatchTimeoutId = null;
     }
   }
 
@@ -197,7 +279,10 @@ export class ManekiWidgetElement extends HTMLElement {
         if (typeof message.target === "string") handleNavigate(message.target);
         break;
       case "interrupt":
-        // Visual feedback for barge-in is Session 5 scope — no-op for now.
+        // Immediate visual confirmation the interruption registered, ahead
+        // of any new audio — the backend's own barge-in handling is what
+        // actually stops playback (see voice_runtime/agent.py).
+        if (this.state === "speaking") this.setState("listening");
         break;
       default:
         console.warn("<maneki-widget> received an unknown data-channel message type:", message.type);
@@ -207,6 +292,6 @@ export class ManekiWidgetElement extends HTMLElement {
   private render(state: WidgetState): void {
     this.orbEl.style.backgroundColor = STATE_COLORS[state];
     this.orbEl.dataset.state = state;
-    this.labelEl.textContent = STATE_LABELS[state];
+    this.labelEl.textContent = state === "error" && this.errorMessage ? this.errorMessage : STATE_LABELS[state];
   }
 }

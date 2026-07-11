@@ -8,6 +8,15 @@ export interface DataMessage {
 }
 export type DataMessageHandler = (message: DataMessage) => void;
 
+export interface ConnectToRoomHandlers {
+  onRemoteAudio: RemoteAudioHandler;
+  onDataMessage: DataMessageHandler;
+  /** Fires only for a disconnect the widget didn't initiate itself (network
+   * drop, server-side room close) — never for our own connection.disconnect()
+   * call, so callers can safely treat this as "the connection was lost". */
+  onDisconnected: () => void;
+}
+
 export interface LiveKitConnection {
   disconnect(): Promise<void>;
 }
@@ -19,26 +28,30 @@ export interface LiveKitConnection {
 export async function connectToRoom(
   livekitUrl: string,
   token: string,
-  onRemoteAudio: RemoteAudioHandler,
-  onDataMessage: DataMessageHandler
+  handlers: ConnectToRoomHandlers
 ): Promise<LiveKitConnection> {
   const { Room, RoomEvent, Track } = await import("livekit-client");
 
   const room = new Room();
+  let intentionalDisconnect = false;
 
   room.on(RoomEvent.TrackSubscribed, (track) => {
     if (track.kind === Track.Kind.Audio) {
-      onRemoteAudio(track.attach());
+      handlers.onRemoteAudio(track.attach());
     }
   });
 
   room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
     try {
       const message = JSON.parse(new TextDecoder().decode(payload)) as DataMessage;
-      onDataMessage(message);
+      handlers.onDataMessage(message);
     } catch (err) {
       console.error("<maneki-widget> received a malformed data-channel message:", err);
     }
+  });
+
+  room.on(RoomEvent.Disconnected, () => {
+    if (!intentionalDisconnect) handlers.onDisconnected();
   });
 
   await room.connect(livekitUrl, token);
@@ -52,6 +65,7 @@ export async function connectToRoom(
 
   return {
     disconnect: async () => {
+      intentionalDisconnect = true;
       await room.disconnect();
     },
   };
