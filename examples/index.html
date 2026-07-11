@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Maneki widget — manual test fixture</title>
+    <style>
+      body {
+        font-family: system-ui, sans-serif;
+        max-width: 640px;
+        margin: 60px auto;
+        line-height: 1.6;
+      }
+      button {
+        margin: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Maneki widget — Session 1 manual check</h1>
+    <p>
+      The orb should appear fixed in the bottom-right corner. Use the buttons
+      below (or the browser console — <code>document.querySelector('maneki-widget').setState('listening')</code>)
+      to cycle through every visual state.
+    </p>
+    <div>
+      <button onclick="widget().setState('idle')">idle</button>
+      <button onclick="widget().setState('connecting')">connecting</button>
+      <button onclick="widget().setState('listening')">listening</button>
+      <button onclick="widget().setState('speaking')">speaking</button>
+      <button onclick="widget().setState('error')">error</button>
+    </div>
+    <p>
+      Also confirm: this page's own CSS below (a red border on every
+      <code>button</code>) does not leak into the widget's shadow DOM, and
+      the widget's internal <code>.orb</code>/<code>.label</code> classes are
+      not selectable from this page (open devtools,
+      <code>document.querySelector('.orb')</code> should return
+      <code>null</code>).
+    </p>
+    <style>
+      button {
+        border: 2px solid red;
+      }
+    </style>
+
+    <maneki-widget></maneki-widget>
+
+    <script type="module" src="../dist/maneki-widget.js"></script>
+    <script>
+      function widget() {
+        return document.querySelector("maneki-widget");
+      }
+    </script>
+  </body>
+</html>
