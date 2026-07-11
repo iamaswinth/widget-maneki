@@ -1,3 +1,6 @@
+import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
+import { connectToRoom, LiveKitConnection } from "./livekit-connection";
+import { getOrCreateSessionId } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
 
 const STATE_LABELS: Record<WidgetState, string> = {
@@ -60,16 +63,33 @@ const STYLE = `
   }
 `;
 
-/** The widget's Custom Element shell. Session 1 scope only: visual states
- * driven by a mocked state machine, no real LiveKit connection yet — that's
- * Session 2. `handleTapToTalk` is a deliberate stub extension point. */
+/** The widget's Custom Element shell.
+ *
+ * Configured declaratively via attributes, not a global config object —
+ * `<maneki-widget site-id="acme" gateway-url="https://gateway.example.com">`.
+ * Missing either attribute is treated as an embedding mistake on the
+ * owner's side (same fail-silent philosophy as a 403 from /widget/token):
+ * nothing renders, an error is logged for the developer, but the host page
+ * never sees a broken UI.
+ */
 export class ManekiWidgetElement extends HTMLElement {
   private stateMachine = new WidgetStateMachine();
   private unsubscribe: (() => void) | null = null;
   private orbEl!: HTMLButtonElement;
   private labelEl!: HTMLSpanElement;
+  private audioContainer!: HTMLDivElement;
+  private connection: LiveKitConnection | null = null;
 
   connectedCallback(): void {
+    const siteId = this.getAttribute("site-id");
+    const gatewayUrl = this.getAttribute("gateway-url");
+    if (!siteId || !gatewayUrl) {
+      console.error(
+        "<maneki-widget> requires both site-id and gateway-url attributes — not rendering."
+      );
+      return;
+    }
+
     const shadow = this.attachShadow({ mode: "open" });
 
     const style = document.createElement("style");
@@ -87,9 +107,13 @@ export class ManekiWidgetElement extends HTMLElement {
     this.labelEl = document.createElement("span");
     this.labelEl.className = "label";
 
+    this.audioContainer = document.createElement("div");
+    this.audioContainer.style.display = "none";
+
     wrap.appendChild(this.orbEl);
     wrap.appendChild(this.labelEl);
     shadow.appendChild(wrap);
+    shadow.appendChild(this.audioContainer);
 
     this.unsubscribe = this.stateMachine.subscribe((state) => this.render(state));
     this.render(this.stateMachine.state);
@@ -97,6 +121,7 @@ export class ManekiWidgetElement extends HTMLElement {
 
   disconnectedCallback(): void {
     this.unsubscribe?.();
+    void this.connection?.disconnect();
   }
 
   /** Exposed for tests and for later sessions to drive real state
@@ -109,10 +134,35 @@ export class ManekiWidgetElement extends HTMLElement {
     return this.stateMachine.state;
   }
 
-  /** Stub — Session 2 replaces this with the real lazy-load-livekit-client
-   * + POST /widget/token + room-join flow. */
-  protected handleTapToTalk(): void {
-    // Intentionally empty in Session 1.
+  protected async handleTapToTalk(): Promise<void> {
+    // Only idle/error can start a connection — a tap while already
+    // connecting/listening/speaking is a no-op, not a reconnect or hangup
+    // (neither is specced yet; see Session 5 for richer interaction).
+    if (this.state !== "idle" && this.state !== "error") return;
+
+    const siteId = this.getAttribute("site-id")!;
+    const gatewayUrl = this.getAttribute("gateway-url")!;
+
+    this.setState("connecting");
+    try {
+      const sessionId = getOrCreateSessionId();
+      const { token, livekit_url: livekitUrl } = await requestWidgetToken(gatewayUrl, {
+        siteId,
+        sessionId,
+        pageUrl: window.location.href,
+      });
+
+      this.connection = await connectToRoom(livekitUrl, token, (audioEl) => {
+        this.audioContainer.appendChild(audioEl);
+        this.setState("speaking");
+      });
+
+      this.setState("listening");
+    } catch (err) {
+      const status = err instanceof WidgetTokenError ? err.status : "unknown";
+      console.error(`<maneki-widget> failed to connect (status=${status}):`, err);
+      this.setState("error");
+    }
   }
 
   private render(state: WidgetState): void {

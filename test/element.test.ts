@@ -2,13 +2,20 @@ import { beforeEach, describe, expect, it } from "vitest";
 import "../src/index";
 import type { ManekiWidgetElement } from "../src/element";
 
-function mountWidget(): ManekiWidgetElement {
+const SITE_ID = "acme";
+const GATEWAY_URL = "https://gateway.example.com";
+
+function mountWidget(withAttrs = true): ManekiWidgetElement {
   const el = document.createElement("maneki-widget") as ManekiWidgetElement;
+  if (withAttrs) {
+    el.setAttribute("site-id", SITE_ID);
+    el.setAttribute("gateway-url", GATEWAY_URL);
+  }
   document.body.appendChild(el);
   return el;
 }
 
-describe("<maneki-widget>", () => {
+describe("<maneki-widget> rendering", () => {
   beforeEach(() => {
     document.body.innerHTML = "";
   });
@@ -17,7 +24,12 @@ describe("<maneki-widget>", () => {
     expect(customElements.get("maneki-widget")).toBeDefined();
   });
 
-  it("renders a Shadow DOM with an orb button and a label", () => {
+  it("does not render without site-id/gateway-url attributes", () => {
+    const el = mountWidget(false);
+    expect(el.shadowRoot).toBeNull();
+  });
+
+  it("renders a Shadow DOM with an orb button and a label when configured", () => {
     const el = mountWidget();
     const shadow = el.shadowRoot!;
     expect(shadow).not.toBeNull();

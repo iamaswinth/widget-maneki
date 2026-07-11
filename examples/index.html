@@ -16,11 +16,11 @@
     </style>
   </head>
   <body>
-    <h1>Maneki widget — Session 1 manual check</h1>
+    <h1>Maneki widget — manual test fixture</h1>
     <p>
       The orb should appear fixed in the bottom-right corner. Use the buttons
       below (or the browser console — <code>document.querySelector('maneki-widget').setState('listening')</code>)
-      to cycle through every visual state.
+      to cycle through every visual state manually.
     </p>
     <div>
       <button onclick="widget().setState('idle')">idle</button>
@@ -43,7 +43,22 @@
       }
     </style>
 
-    <maneki-widget></maneki-widget>
+    <h2>Real connection test (Session 2)</h2>
+    <p>
+      Clicking the orb itself now calls a real running gateway at
+      <code>http://localhost:8080</code>. This requires: the gateway running
+      locally, a tenant named <code>acme</code> that's <code>published</code>
+      with <code>allowed_origin</code> matching whatever origin serves this
+      page — serve this directory on <strong>port 5500</strong> to match the
+      tenant seeded earlier in this project
+      (<code>npx serve . -l 5500</code>, then open
+      <code>http://localhost:5500/examples/</code>, not via <code>file://</code>
+      — ES module scripts are blocked from <code>file://</code> by the
+      browser). Watch the Network tab for the <code>POST /widget/token</code>
+      call and the DevTools console for any connection errors.
+    </p>
+
+    <maneki-widget site-id="acme" gateway-url="http://localhost:8080"></maneki-widget>
 
     <script type="module" src="../dist/maneki-widget.js"></script>
     <script>
