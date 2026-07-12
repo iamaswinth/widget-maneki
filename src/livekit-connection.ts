@@ -25,8 +25,15 @@ export interface ConnectToRoomHandlers {
   onTranscription?: TranscriptionHandler;
 }
 
+// LiveKit Agents' AgentSession wires a text-stream handler on this topic by
+// default (RoomIO._on_chat_text_stream in the livekit-agents Python SDK) and
+// feeds it into the exact same generate_reply() pipeline a transcribed voice
+// turn uses — no backend opt-in needed, this is enabled out of the box.
+const CHAT_TOPIC = "lk.chat";
+
 export interface LiveKitConnection {
   disconnect(): Promise<void>;
+  sendText(text: string): Promise<void>;
 }
 
 /** The only place `livekit-client` is imported — a dynamic import, so it's
@@ -85,6 +92,9 @@ export async function connectToRoom(
     disconnect: async () => {
       intentionalDisconnect = true;
       await room.disconnect();
+    },
+    sendText: async (text: string) => {
+      await room.localParticipant.sendText(text, { topic: CHAT_TOPIC });
     },
   };
 }

@@ -69,6 +69,26 @@ const STYLE = `
     max-width: 220px;
     text-align: center;
   }
+  .text-form {
+    display: flex;
+    gap: 4px;
+  }
+  .text-input {
+    font-size: 13px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid #d1d5db;
+    width: 160px;
+  }
+  .text-send {
+    font-size: 13px;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border: none;
+    background: #4b5563;
+    color: #fff;
+    cursor: pointer;
+  }
 `;
 
 /** The widget's Custom Element shell.
@@ -85,6 +105,7 @@ export class ManekiWidgetElement extends HTMLElement {
   private unsubscribe: (() => void) | null = null;
   private orbEl!: HTMLButtonElement;
   private labelEl!: HTMLSpanElement;
+  private textInputEl!: HTMLInputElement;
   private audioContainer!: HTMLDivElement;
   private connection: LiveKitConnection | null = null;
   private errorMessage: string | null = null;
@@ -118,11 +139,37 @@ export class ManekiWidgetElement extends HTMLElement {
     this.labelEl = document.createElement("span");
     this.labelEl.className = "label";
 
+    // Testing/accessibility fallback alongside the mic — typed text drives
+    // the identical backend pipeline as a transcribed voice turn (LiveKit
+    // Agents' built-in "lk.chat" text-stream handler calls the same
+    // generate_reply() a confirmed voice utterance does — see
+    // livekit-connection.ts's CHAT_TOPIC comment).
+    const textForm = document.createElement("form");
+    textForm.className = "text-form";
+    this.textInputEl = document.createElement("input");
+    this.textInputEl.type = "text";
+    this.textInputEl.className = "text-input";
+    this.textInputEl.placeholder = "Type a message…";
+    this.textInputEl.setAttribute("aria-label", "Type a message");
+    const sendBtn = document.createElement("button");
+    sendBtn.type = "submit";
+    sendBtn.className = "text-send";
+    sendBtn.textContent = "Send";
+    textForm.appendChild(this.textInputEl);
+    textForm.appendChild(sendBtn);
+    textForm.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const text = this.textInputEl.value;
+      this.textInputEl.value = "";
+      void this.handleTextSubmit(text);
+    });
+
     this.audioContainer = document.createElement("div");
     this.audioContainer.style.display = "none";
 
     wrap.appendChild(this.orbEl);
     wrap.appendChild(this.labelEl);
+    wrap.appendChild(textForm);
     shadow.appendChild(wrap);
     shadow.appendChild(this.audioContainer);
 
@@ -173,6 +220,22 @@ export class ManekiWidgetElement extends HTMLElement {
     if (this.state !== "idle" && this.state !== "error") return;
     this.reconnectAttempted = false;
     await this.attemptConnect();
+  }
+
+  /** Connects first (same flow as tap-to-talk) if not already connected,
+   * then sends the typed text over the room's "lk.chat" text stream — the
+   * backend treats it exactly like a transcribed voice turn. */
+  private async handleTextSubmit(text: string): Promise<void> {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    if (this.state === "idle" || this.state === "error") {
+      this.reconnectAttempted = false;
+      await this.attemptConnect();
+    }
+    if (!this.connection) return; // attemptConnect failed; error state already shown
+
+    await this.connection.sendText(trimmed);
   }
 
   private async attemptConnect(): Promise<void> {

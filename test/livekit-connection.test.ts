@@ -5,13 +5,14 @@ const mockConnect = vi.fn().mockResolvedValue(undefined);
 const mockDisconnect = vi.fn().mockResolvedValue(undefined);
 const mockSetMicrophoneEnabled = vi.fn().mockResolvedValue(undefined);
 const mockStartAudio = vi.fn().mockResolvedValue(undefined);
+const mockSendText = vi.fn().mockResolvedValue(undefined);
 
 class FakeRoom {
   on = mockOn;
   connect = mockConnect;
   disconnect = mockDisconnect;
   startAudio = mockStartAudio;
-  localParticipant = { setMicrophoneEnabled: mockSetMicrophoneEnabled };
+  localParticipant = { setMicrophoneEnabled: mockSetMicrophoneEnabled, sendText: mockSendText };
 }
 
 // Intercepts both the static type-only import in livekit-connection.ts and
@@ -50,6 +51,7 @@ beforeEach(() => {
   mockDisconnect.mockClear();
   mockSetMicrophoneEnabled.mockClear();
   mockStartAudio.mockClear();
+  mockSendText.mockClear();
 });
 
 describe("connectToRoom", () => {
@@ -179,6 +181,16 @@ describe("connectToRoom", () => {
       getHandler("transcriptionReceived")([{ id: "seg-5", text: "hello", final: true }], undefined);
 
       expect(onTranscription).toHaveBeenCalledWith("hello", "agent");
+    });
+  });
+
+  describe("sendText", () => {
+    it("sends the text over the lk.chat topic", async () => {
+      const connection = await connectToRoom("wss://lk.example.com", "jwt-abc", handlers());
+
+      await connection.sendText("how much does it cost?");
+
+      expect(mockSendText).toHaveBeenCalledWith("how much does it cost?", { topic: "lk.chat" });
     });
   });
 });

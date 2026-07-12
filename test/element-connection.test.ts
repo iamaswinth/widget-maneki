@@ -47,6 +47,13 @@ function click(el: ManekiWidgetElement): void {
   el.shadowRoot!.querySelector<HTMLButtonElement>("button.orb")!.click();
 }
 
+function submitText(el: ManekiWidgetElement, text: string): void {
+  const input = el.shadowRoot!.querySelector<HTMLInputElement>(".text-input")!;
+  const form = el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!;
+  input.value = text;
+  form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+}
+
 function label(el: ManekiWidgetElement): string {
   return el.shadowRoot!.querySelector(".label")!.textContent!;
 }
@@ -447,5 +454,70 @@ describe("error and edge states", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("text input", () => {
+  it("connects first, then sends, when submitted while idle", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockSendText = vi.fn().mockResolvedValue(undefined);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendText: mockSendText });
+
+    const el = mountWidget();
+    expect(el.state).toBe("idle");
+
+    submitText(el, "how much does it cost?");
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockRequestWidgetToken).toHaveBeenCalledTimes(1);
+    expect(mockSendText).toHaveBeenCalledWith("how much does it cost?");
+  });
+
+  it("sends directly, without reconnecting, when already connected", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockSendText = vi.fn().mockResolvedValue(undefined);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendText: mockSendText });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    mockRequestWidgetToken.mockClear();
+
+    submitText(el, "what about the FAQ?");
+    await vi.waitFor(() => expect(mockSendText).toHaveBeenCalledWith("what about the FAQ?"));
+
+    expect(mockRequestWidgetToken).not.toHaveBeenCalled();
+  });
+
+  it("is a no-op for empty or whitespace-only input", async () => {
+    const el = mountWidget();
+
+    submitText(el, "   ");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(el.state).toBe("idle");
+    expect(mockRequestWidgetToken).not.toHaveBeenCalled();
+  });
+
+  it("leaves the widget in its error state and never sends if the connect attempt fails", async () => {
+    mockRequestWidgetToken.mockRejectedValue(new FakeWidgetTokenError(500, "boom"));
+
+    const el = mountWidget();
+    submitText(el, "hello?");
+
+    await vi.waitFor(() => expect(el.state).toBe("error"));
+    expect(mockConnectToRoom).not.toHaveBeenCalled();
+  });
+
+  it("clears the input field after submitting", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendText: vi.fn() });
+
+    const el = mountWidget();
+    submitText(el, "hello");
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    const input = el.shadowRoot!.querySelector<HTMLInputElement>(".text-input")!;
+    expect(input.value).toBe("");
   });
 });
