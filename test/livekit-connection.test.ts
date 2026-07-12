@@ -18,7 +18,12 @@ class FakeRoom {
 // the runtime dynamic import() it performs — vitest's vi.mock handles both.
 vi.mock("livekit-client", () => ({
   Room: FakeRoom,
-  RoomEvent: { TrackSubscribed: "trackSubscribed", DataReceived: "dataReceived", Disconnected: "disconnected" },
+  RoomEvent: {
+    TrackSubscribed: "trackSubscribed",
+    DataReceived: "dataReceived",
+    Disconnected: "disconnected",
+    TranscriptionReceived: "transcriptionReceived",
+  },
   Track: { Kind: { Audio: "audio", Video: "video" } },
 }));
 
@@ -119,5 +124,61 @@ describe("connectToRoom", () => {
     getHandler("disconnected")();
 
     expect(h.onDisconnected).not.toHaveBeenCalled();
+  });
+
+  describe("transcription", () => {
+    it("reports the local participant's final segment as 'you'", async () => {
+      const onTranscription = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onTranscription }));
+
+      getHandler("transcriptionReceived")(
+        [{ id: "seg-1", text: "how much does it cost", final: true }],
+        { isLocal: true }
+      );
+
+      expect(onTranscription).toHaveBeenCalledWith("how much does it cost", "you");
+    });
+
+    it("reports a remote participant's final segment as 'agent'", async () => {
+      const onTranscription = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onTranscription }));
+
+      getHandler("transcriptionReceived")(
+        [{ id: "seg-2", text: "It starts at forty nine dollars.", final: true }],
+        { isLocal: false }
+      );
+
+      expect(onTranscription).toHaveBeenCalledWith("It starts at forty nine dollars.", "agent");
+    });
+
+    it("ignores interim (non-final) segments", async () => {
+      const onTranscription = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onTranscription }));
+
+      getHandler("transcriptionReceived")([{ id: "seg-3", text: "It starts at", final: false }], {
+        isLocal: false,
+      });
+
+      expect(onTranscription).not.toHaveBeenCalled();
+    });
+
+    it("does nothing when onTranscription is omitted (optional handler)", async () => {
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers());
+
+      expect(() =>
+        getHandler("transcriptionReceived")([{ id: "seg-4", text: "hi", final: true }], {
+          isLocal: true,
+        })
+      ).not.toThrow();
+    });
+
+    it("treats a missing participant as remote (agent) — LiveKit omits it for some server-attributed segments", async () => {
+      const onTranscription = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onTranscription }));
+
+      getHandler("transcriptionReceived")([{ id: "seg-5", text: "hello", final: true }], undefined);
+
+      expect(onTranscription).toHaveBeenCalledWith("hello", "agent");
+    });
   });
 });

@@ -8,6 +8,12 @@ export interface DataMessage {
 }
 export type DataMessageHandler = (message: DataMessage) => void;
 
+/** "you" for the visitor's own transcribed speech, "agent" for the voice
+ * runtime's generated replies — LiveKit's own transcript sync delivers both
+ * over the room automatically (see agent.py's TranscriptSynchronizer),
+ * independent of whether TTS audio actually plays. */
+export type TranscriptionHandler = (text: string, speaker: "you" | "agent") => void;
+
 export interface ConnectToRoomHandlers {
   onRemoteAudio: RemoteAudioHandler;
   onDataMessage: DataMessageHandler;
@@ -15,6 +21,8 @@ export interface ConnectToRoomHandlers {
    * drop, server-side room close) — never for our own connection.disconnect()
    * call, so callers can safely treat this as "the connection was lost". */
   onDisconnected: () => void;
+  /** Optional — omit to skip transcript logging entirely. */
+  onTranscription?: TranscriptionHandler;
 }
 
 export interface LiveKitConnection {
@@ -52,6 +60,16 @@ export async function connectToRoom(
 
   room.on(RoomEvent.Disconnected, () => {
     if (!intentionalDisconnect) handlers.onDisconnected();
+  });
+
+  room.on(RoomEvent.TranscriptionReceived, (segments, participant) => {
+    if (!handlers.onTranscription) return;
+    for (const segment of segments) {
+      // Interim (non-final) segments update rapidly as STT/TTS stream in —
+      // only the final text per segment id is worth printing.
+      if (!segment.final) continue;
+      handlers.onTranscription(segment.text, participant?.isLocal ? "you" : "agent");
+    }
   });
 
   await room.connect(livekitUrl, token);

@@ -215,6 +215,7 @@ export class ManekiWidgetElement extends HTMLElement {
         },
         onDataMessage: (message) => this.handleDataMessage(message),
         onDisconnected: () => this.handleUnexpectedDisconnect(),
+        onTranscription: (text, speaker) => console.log(`${speaker}> ${text}`),
       });
 
       this.setState("listening");
