@@ -25,6 +25,10 @@ const STATE_COLORS: Record<WidgetState, string> = {
 // an audio track before treating it as a dispatch failure.
 const DISPATCH_TIMEOUT_MS = 8000;
 
+// How long the hangup button stays "armed" (awaiting a confirming second
+// tap) before silently disarming itself.
+const HANGUP_REVERT_MS = 3000;
+
 const STYLE = `
   :host {
     all: initial;
@@ -89,6 +93,18 @@ const STYLE = `
     color: #fff;
     cursor: pointer;
   }
+  .hangup {
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    border: none;
+    background: #f97316;
+    color: #fff;
+    cursor: pointer;
+  }
+  .hangup[data-armed="true"] {
+    background: #dc2626;
+  }
 `;
 
 /** The widget's Custom Element shell.
@@ -106,11 +122,14 @@ export class ManekiWidgetElement extends HTMLElement {
   private orbEl!: HTMLButtonElement;
   private labelEl!: HTMLSpanElement;
   private textInputEl!: HTMLInputElement;
+  private hangupEl!: HTMLButtonElement;
   private audioContainer!: HTMLDivElement;
   private connection: LiveKitConnection | null = null;
   private errorMessage: string | null = null;
   private dispatchTimeoutId: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempted = false;
+  private hangupArmed = false;
+  private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
 
   connectedCallback(): void {
     const siteId = this.getAttribute("site-id");
@@ -138,6 +157,11 @@ export class ManekiWidgetElement extends HTMLElement {
 
     this.labelEl = document.createElement("span");
     this.labelEl.className = "label";
+
+    this.hangupEl = document.createElement("button");
+    this.hangupEl.className = "hangup";
+    this.hangupEl.type = "button";
+    this.hangupEl.addEventListener("click", () => this.handleHangupTap());
 
     // Testing/accessibility fallback alongside the mic — typed text drives
     // the identical backend pipeline as a transcribed voice turn (LiveKit
@@ -169,6 +193,7 @@ export class ManekiWidgetElement extends HTMLElement {
 
     wrap.appendChild(this.orbEl);
     wrap.appendChild(this.labelEl);
+    wrap.appendChild(this.hangupEl);
     wrap.appendChild(textForm);
     shadow.appendChild(wrap);
     shadow.appendChild(this.audioContainer);
@@ -201,6 +226,7 @@ export class ManekiWidgetElement extends HTMLElement {
   disconnectedCallback(): void {
     this.unsubscribe?.();
     this.clearDispatchTimeout();
+    this.clearHangupRevertTimer();
     void this.connection?.disconnect();
   }
 
@@ -220,6 +246,41 @@ export class ManekiWidgetElement extends HTMLElement {
     if (this.state !== "idle" && this.state !== "error") return;
     this.reconnectAttempted = false;
     await this.attemptConnect();
+  }
+
+  /** The hangup button requires two taps: the first "arms" it (and
+   * auto-disarms after HANGUP_REVERT_MS if left untouched, so a single
+   * stray tap can't end the call), the second actually disconnects. */
+  private async handleHangupTap(): Promise<void> {
+    if (!this.hangupArmed) {
+      this.hangupArmed = true;
+      this.render(this.state);
+      this.hangupRevertTimerId = setTimeout(() => {
+        this.hangupRevertTimerId = null;
+        this.hangupArmed = false;
+        this.render(this.state);
+      }, HANGUP_REVERT_MS);
+      return;
+    }
+
+    this.clearHangupRevertTimer();
+    await this.endCall();
+  }
+
+  /** Visitor-initiated hangup — the only path (besides the element being
+   * removed from the DOM, see disconnectedCallback) that intentionally
+   * disconnects and returns to idle. Deliberately leaves the sessionStorage
+   * session_id alone: it exists so a conversation can resume on a later
+   * tap, and ending one call shouldn't burn that continuity. */
+  private async endCall(): Promise<void> {
+    this.clearDispatchTimeout();
+    this.clearHangupRevertTimer();
+    await this.connection?.disconnect();
+    this.connection = null;
+    this.reconnectAttempted = false;
+    this.errorMessage = null;
+    this.hangupArmed = false;
+    this.setState("idle");
   }
 
   /** Connects first (same flow as tap-to-talk) if not already connected,
@@ -355,6 +416,13 @@ export class ManekiWidgetElement extends HTMLElement {
     }
   }
 
+  private clearHangupRevertTimer(): void {
+    if (this.hangupRevertTimerId !== null) {
+      clearTimeout(this.hangupRevertTimerId);
+      this.hangupRevertTimerId = null;
+    }
+  }
+
   private handleDataMessage(message: DataMessage): void {
     switch (message.type) {
       case "navigate":
@@ -375,5 +443,16 @@ export class ManekiWidgetElement extends HTMLElement {
     this.orbEl.style.backgroundColor = STATE_COLORS[state];
     this.orbEl.dataset.state = state;
     this.labelEl.textContent = state === "error" && this.errorMessage ? this.errorMessage : STATE_LABELS[state];
+
+    const active = state === "listening" || state === "speaking";
+    if (!active) {
+      this.clearHangupRevertTimer();
+      this.hangupArmed = false;
+    }
+    this.hangupEl.style.display = active ? "" : "none";
+    this.hangupEl.dataset.armed = String(this.hangupArmed);
+    const hangupLabel = this.hangupArmed ? "Confirm end call?" : "End call";
+    this.hangupEl.textContent = hangupLabel;
+    this.hangupEl.setAttribute("aria-label", hangupLabel);
   }
 }

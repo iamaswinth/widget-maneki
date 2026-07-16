@@ -47,6 +47,14 @@ function click(el: ManekiWidgetElement): void {
   el.shadowRoot!.querySelector<HTMLButtonElement>("button.orb")!.click();
 }
 
+function hangupButton(el: ManekiWidgetElement): HTMLButtonElement {
+  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.hangup")!;
+}
+
+function clickHangup(el: ManekiWidgetElement): void {
+  hangupButton(el).click();
+}
+
 function submitText(el: ManekiWidgetElement, text: string): void {
   const input = el.shadowRoot!.querySelector<HTMLInputElement>(".text-input")!;
   const form = el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!;
@@ -519,5 +527,127 @@ describe("text input", () => {
 
     const input = el.shadowRoot!.querySelector<HTMLInputElement>(".text-input")!;
     expect(input.value).toBe("");
+  });
+});
+
+describe("hangup", () => {
+  it("hides the hangup button while idle", () => {
+    const el = mountWidget();
+    expect(hangupButton(el).style.display).toBe("none");
+  });
+
+  it("shows the hangup button once listening", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(hangupButton(el).style.display).not.toBe("none");
+  });
+
+  it("arms on the first tap without disconnecting", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockDisconnect = vi.fn().mockResolvedValue(undefined);
+    mockConnectToRoom.mockResolvedValue({ disconnect: mockDisconnect });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    clickHangup(el);
+
+    expect(mockDisconnect).not.toHaveBeenCalled();
+    expect(el.state).toBe("listening");
+    expect(hangupButton(el).textContent).toMatch(/confirm/i);
+  });
+
+  it("disconnects and returns to idle on a confirming second tap", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockDisconnect = vi.fn().mockResolvedValue(undefined);
+    mockConnectToRoom.mockResolvedValue({ disconnect: mockDisconnect });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    clickHangup(el); // arm
+    clickHangup(el); // confirm
+    await vi.waitFor(() => expect(el.state).toBe("idle"));
+
+    expect(mockDisconnect).toHaveBeenCalledTimes(1);
+    expect(hangupButton(el).style.display).toBe("none");
+    expect(label(el)).toBe("Tap to talk");
+  });
+
+  it("auto-reverts the armed state after the timeout without disconnecting", async () => {
+    vi.useFakeTimers();
+    try {
+      mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+      const mockDisconnect = vi.fn().mockResolvedValue(undefined);
+      mockConnectToRoom.mockResolvedValue({ disconnect: mockDisconnect });
+
+      const el = mountWidget();
+      click(el);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(el.state).toBe("listening");
+
+      clickHangup(el);
+      expect(hangupButton(el).textContent).toMatch(/confirm/i);
+
+      await vi.advanceTimersByTimeAsync(3000);
+
+      expect(hangupButton(el).textContent).toMatch(/end call/i);
+      expect(hangupButton(el).textContent).not.toMatch(/confirm/i);
+      expect(mockDisconnect).not.toHaveBeenCalled();
+      expect(el.state).toBe("listening");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the sessionStorage session_id untouched after a confirmed hangup", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn().mockResolvedValue(undefined) });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    const sessionId = window.sessionStorage.getItem("maneki_session_id");
+    expect(sessionId).toBeTruthy();
+
+    clickHangup(el);
+    clickHangup(el);
+    await vi.waitFor(() => expect(el.state).toBe("idle"));
+
+    expect(window.sessionStorage.getItem("maneki_session_id")).toBe(sessionId);
+  });
+
+  it("resets the armed state instead of leaving a stale confirm label after an unexpected disconnect", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    let handlers!: ConnectToRoomHandlers;
+    mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
+      handlers = h;
+      return { disconnect: vi.fn().mockResolvedValue(undefined) };
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    clickHangup(el); // arm
+    expect(hangupButton(el).textContent).toMatch(/confirm/i);
+
+    handlers.onDisconnected(); // first drop -> silent reconnect
+    handlers.onDisconnected(); // second drop in a row -> give up
+
+    await vi.waitFor(() => expect(el.state).toBe("error"));
+    expect(hangupButton(el).style.display).toBe("none");
+
+    // A fresh connect afterward starts unarmed, not still "confirming".
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    expect(hangupButton(el).textContent).toMatch(/end call/i);
   });
 });
