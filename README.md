@@ -127,8 +127,15 @@ it does today — nothing here is blocked on the gateway being live.
 
 ### Get a domain before the first customer embed
 
-`r2.dev` works for testing, but Cloudflare rate-limits it and says not to use it for
-production traffic. More importantly the embed URL ends up pasted into customers' HTML,
-which makes it effectively permanent — migrating later means a support campaign you will
-never fully finish. A domain is ~$10/yr; switching is one `CDN_BASE_URL` change plus DNS,
-with no code change.
+`r2.dev` works for testing, but three things make it wrong for production:
+
+1. **Cloudflare rate-limits it** and explicitly says not to use it for production traffic.
+2. **It serves everything uncompressed.** Measured against the live bucket: the
+   `livekit-client` chunk transfers **733 KB** even when the client offers `gzip, br` — no
+   `Content-Encoding` comes back. Gzipped it is **166 KB**, so every cold load on every
+   customer's site costs 4.4× more bandwidth than it needs to. A custom domain puts the
+   bucket behind Cloudflare's normal CDN path, which compresses automatically.
+3. **The embed URL is effectively permanent** once it is pasted into customers' HTML —
+   migrating later means a support campaign you will never fully finish.
+
+A domain is ~$10/yr; switching is one `CDN_BASE_URL` change plus DNS, no code change.
