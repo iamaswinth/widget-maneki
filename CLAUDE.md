@@ -48,6 +48,27 @@ browser): `npm run build`, then open `examples/index.html` directly in a browser
 it (`npx serve .`) and navigate to `/examples/`. Use the on-page buttons or
 `document.querySelector('maneki-widget').setState('listening')` in devtools to cycle states.
 
+## Releases
+
+Delivered as a hosted script on Cloudflare R2, not via npm (`package.json` is `private`).
+`dist/` stays gitignored and is built in CI — see `README.md` for the embed snippet, the
+release/rollback runbooks, and the one-time R2 setup.
+
+Two invariants that are easy to break and expensive to discover:
+
+- **Deploys are additive; never add `--delete` to `scripts/promote.sh`.** The entry file
+  imports a content-hashed chunk by name and is cached by browsers, so deleting an older
+  release's chunks 404s already-cached entry files on live customer sites — unfixable by
+  redeploying.
+- **The bucket needs CORS.** `<script type="module">` and dynamic `import()` both fetch in
+  CORS mode; without `Access-Control-Allow-Origin` the widget cannot load cross-origin at
+  all. `scripts/smoke.sh` checks this (plus MIME type and chunk resolution) on every
+  release, before the floating alias moves.
+
+`__MANEKI_GATEWAY_URL__` is substituted at build time by Vite's `define`. It must be
+declared in **both** `vite.config.ts` and `vitest.config.ts` — vitest does not read the
+former, and a missing definition is a `ReferenceError` in every element test.
+
 ## Conventions worth preserving
 
 - Every network call needs a defined failure UI state — this code runs inside someone else's

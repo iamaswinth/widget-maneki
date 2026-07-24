@@ -143,12 +143,21 @@ export class ManekiWidgetElement extends HTMLElement {
   private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
   private textInputRevealed = false;
 
+  /** The gateway to talk to: the `gateway-url` attribute if present, else the
+   * URL baked in at build time (see vite.config.ts). A released build carries
+   * the production gateway so the embed snippet is a single tag with no
+   * config; the attribute stays available to point a page at a local or
+   * staging gateway. Empty string means neither was supplied. */
+  private resolveGatewayUrl(): string {
+    return this.getAttribute("gateway-url") || __MANEKI_GATEWAY_URL__;
+  }
+
   connectedCallback(): void {
     const siteId = this.getAttribute("site-id");
-    const gatewayUrl = this.getAttribute("gateway-url");
-    if (!siteId || !gatewayUrl) {
+    if (!siteId || !this.resolveGatewayUrl()) {
       console.error(
-        "<maneki-widget> requires both site-id and gateway-url attributes — not rendering."
+        "<maneki-widget> requires a site-id attribute, and a gateway-url attribute " +
+          "unless this build has one baked in — not rendering."
       );
       return;
     }
@@ -332,7 +341,8 @@ export class ManekiWidgetElement extends HTMLElement {
 
   private async attemptConnect(): Promise<void> {
     const siteId = this.getAttribute("site-id")!;
-    const gatewayUrl = this.getAttribute("gateway-url")!;
+    // Non-null safe: connectedCallback refused to render without both.
+    const gatewayUrl = this.resolveGatewayUrl();
 
     this.errorMessage = null;
 

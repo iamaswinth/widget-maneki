@@ -58,6 +58,16 @@
       call and the DevTools console for any connection errors.
     </p>
 
+    <!--
+      Local fixture: gateway-url is explicit because a local `npm run build`
+      bakes in no default. A released build carries the production gateway, so
+      a real embed is just:
+
+        <script type="module" src="https://YOUR_CDN/v1/maneki-widget.js"></script>
+        <maneki-widget site-id="acme"></maneki-widget>
+
+      See README.md.
+    -->
     <maneki-widget site-id="acme" gateway-url="http://localhost:8080"></maneki-widget>
 
     <script type="module" src="../dist/maneki-widget.js"></script>

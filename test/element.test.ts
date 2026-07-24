@@ -29,6 +29,18 @@ describe("<maneki-widget> rendering", () => {
     expect(el.shadowRoot).toBeNull();
   });
 
+  it("does not render with a site-id but no gateway to talk to", () => {
+    // Tests build with __MANEKI_GATEWAY_URL__ = "" (vitest.config.ts), so the
+    // attribute is the only source of a gateway URL here. A release build
+    // bakes one in and this element would render — that's the point of the
+    // fallback, and why this asserts the un-baked half of it.
+    const el = document.createElement("maneki-widget") as ManekiWidgetElement;
+    el.setAttribute("site-id", SITE_ID);
+    document.body.appendChild(el);
+
+    expect(el.shadowRoot).toBeNull();
+  });
+
   it("renders a Shadow DOM with an orb button and a label when configured", () => {
     const el = mountWidget();
     const shadow = el.shadowRoot!;

@@ -1,0 +1,54 @@
+name: Promote
+
+# Points /v{major}/ at any already-published version. This is the rollback
+# button: no rebuild, no tag, no dependency on the broken version's source
+# still being buildable — it is a server-side copy of bytes that were already
+# published and smoke-tested. Takes effect within the entry file's 300s TTL.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact published version to point the major alias at (e.g. 1.2.3)"
+        required: true
+        type: string
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Parse version
+        id: version
+        run: |
+          FULL="${{ inputs.version }}"
+          FULL="${FULL#v}"
+          if ! printf '%s' "$FULL" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "expected an exact version like 1.2.3, got '${{ inputs.version }}'" >&2
+            exit 1
+          fi
+          echo "full=$FULL"        >> "$GITHUB_OUTPUT"
+          echo "major=${FULL%%.*}" >> "$GITHUB_OUTPUT"
+
+      # Refuse early and clearly rather than silently creating an empty alias
+      # from a typo'd version — which would take the widget down everywhere.
+      - name: Verify that version was actually published
+        run: |
+          ./scripts/smoke.sh "${{ vars.CDN_BASE_URL }}" "v${{ steps.version.outputs.full }}"
+
+      - name: Promote
+        run: ./scripts/promote.sh "${{ steps.version.outputs.full }}"
+
+      - name: Verify the alias
+        run: ./scripts/smoke.sh "${{ vars.CDN_BASE_URL }}" "v${{ steps.version.outputs.major }}"
+
+      - name: Summary
+        run: |
+          echo "\`/v${{ steps.version.outputs.major }}/\` now serves **${{ steps.version.outputs.full }}** (propagates within ~5 min)." >> "$GITHUB_STEP_SUMMARY"

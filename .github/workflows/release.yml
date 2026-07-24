@@ -1,0 +1,81 @@
+name: Release
+
+# Tag-triggered, so publishing is always a deliberate act:
+#   npm version 1.2.3 && git push --follow-tags
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      R2_BUCKET: ${{ vars.R2_BUCKET }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      # R2 is S3-compatible but has no regions; the CLI still demands one.
+      AWS_DEFAULT_REGION: auto
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Resolve and verify version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag v$TAG does not match package.json version $PKG" >&2
+            exit 1
+          fi
+          echo "full=$TAG"        >> "$GITHUB_OUTPUT"
+          echo "major=${TAG%%.*}" >> "$GITHUB_OUTPUT"
+
+      # The full CI gate again rather than trusting that main was green: a tag
+      # can point at any commit, including one CI never saw.
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+
+      - name: Build
+        env:
+          # Empty until a gateway is deployed; the widget then simply requires
+          # the gateway-url attribute, exactly as it does today.
+          MANEKI_GATEWAY_URL: ${{ vars.MANEKI_GATEWAY_URL }}
+        run: npm run build
+
+      - name: Upload immutable version
+        run: ./scripts/upload.sh "${{ steps.version.outputs.full }}"
+
+      # Before the alias moves. A broken MIME type or missing bucket CORS fails
+      # here, on a path nobody is embedding yet, instead of on /v{major}/ where
+      # every customer would see it.
+      - name: Smoke-test the immutable path
+        run: ./scripts/smoke.sh "${{ vars.CDN_BASE_URL }}" "v${{ steps.version.outputs.full }}"
+
+      - name: Promote to the floating major
+        run: ./scripts/promote.sh "${{ steps.version.outputs.full }}"
+
+      - name: Smoke-test the floating path
+        run: ./scripts/smoke.sh "${{ vars.CDN_BASE_URL }}" "v${{ steps.version.outputs.major }}"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`${{ github.ref_name }}\`"
+            echo
+            echo '```html'
+            echo '<script type="module"'
+            echo "        src=\"${{ vars.CDN_BASE_URL }}/v${{ steps.version.outputs.major }}/maneki-widget.js\""
+            echo '        site-id="YOUR_SITE_ID"></script>'
+            echo '```'
+            echo
+            echo "Pinned: \`${{ vars.CDN_BASE_URL }}/v${{ steps.version.outputs.full }}/maneki-widget.js\`"
+            echo
+            echo "To roll back, run the **Promote** workflow with an earlier version."
+          } >> "$GITHUB_STEP_SUMMARY"

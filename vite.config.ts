@@ -1,6 +1,13 @@
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  // Baked into the bundle so a released widget needs no gateway-url attribute
+  // — the embed snippet stays a single tag. Empty unless the build sets it
+  // (release.yml passes the production gateway), which keeps every local build
+  // behaving exactly as before: attribute required.
+  define: {
+    __MANEKI_GATEWAY_URL__: JSON.stringify(process.env.MANEKI_GATEWAY_URL ?? ""),
+  },
   build: {
     lib: {
       entry: "src/index.ts",

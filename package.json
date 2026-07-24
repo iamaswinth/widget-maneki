@@ -1,15 +1,15 @@
 {
   "name": "@maneki/widget",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Embeddable voice sales agent widget",
   "type": "module",
-  "main": "./dist/maneki-widget.js",
-  "types": "./dist/index.d.ts",
+  "private": true,
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "typescript": "^5.6.0",
