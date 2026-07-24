@@ -1,5 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { extractAnchorId, handleNavigate, isSamePageTarget, PENDING_NAVIGATION_KEY } from "../src/navigation";
+import {
+  extractAnchorId,
+  handleNavigate,
+  isSamePageTarget,
+  PENDING_NAVIGATION_KEY,
+  resolveNavigationTarget,
+} from "../src/navigation";
 
 const CURRENT = new URL("https://acme.example.com/pricing");
 
@@ -110,5 +116,71 @@ describe("handleNavigate", () => {
     handleNavigate("#pricing", { win: fakeWin("https://acme.example.com/page"), doc: document, storage });
 
     expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+  });
+
+  describe("untrusted targets", () => {
+    // handleNavigate ends in a location.href assignment on the tenant's own
+    // site. The target traces back to crawled page content, so it is not a
+    // trusted string just because it arrived over the data channel.
+    const refused = [
+      ["a javascript: URL (executes script on the host page)", "javascript:alert(document.cookie)"],
+      ["a javascript: URL with mixed case and padding", "  JaVaScRiPt:alert(1)"],
+      ["a data: URL", "data:text/html,<script>alert(1)</script>"],
+      ["an off-origin page (open redirect / phishing)", "https://evil.example.com/login"],
+      ["a protocol-relative off-origin URL", "//evil.example.com/login"],
+      ["an https -> http downgrade on the same host", "http://acme.example.com/faq"],
+    ] as const;
+
+    for (const [label, target] of refused) {
+      it(`refuses ${label}`, () => {
+        const win = fakeWin("https://acme.example.com/pricing");
+        const storage = fakeStorage();
+
+        handleNavigate(target, { win, doc: document, storage });
+
+        expect(win.location.href).toBe("https://acme.example.com/pricing");
+        // A refused navigation must not arm auto-resume either, or the next
+        // page load would reconnect on the strength of a navigation that
+        // never happened.
+        expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+      });
+    }
+
+    it("still allows an ordinary same-origin path", () => {
+      const win = fakeWin("https://acme.example.com/pricing");
+      const storage = fakeStorage();
+
+      handleNavigate("/faq", { win, doc: document, storage });
+
+      expect(win.location.href).toBe("https://acme.example.com/faq");
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBe("1");
+    });
+  });
+});
+
+describe("resolveNavigationTarget", () => {
+  const CURRENT_PAGE = new URL("https://acme.example.com/pricing");
+
+  it("resolves a relative path against the current page", () => {
+    expect(resolveNavigationTarget("/faq", CURRENT_PAGE)?.href).toBe("https://acme.example.com/faq");
+  });
+
+  it("returns the parsed URL, not the caller's string", () => {
+    // What gets assigned must be what passed the check — no room for our
+    // parse and the browser's to disagree.
+    expect(resolveNavigationTarget("/a/../b", CURRENT_PAGE)?.href).toBe("https://acme.example.com/b");
+  });
+
+  it("rejects an unparseable target", () => {
+    expect(resolveNavigationTarget("http://[", CURRENT_PAGE)).toBeNull();
+  });
+
+  it("rejects a non-http(s) scheme", () => {
+    expect(resolveNavigationTarget("javascript:alert(1)", CURRENT_PAGE)).toBeNull();
+    expect(resolveNavigationTarget("blob:https://acme.example.com/x", CURRENT_PAGE)).toBeNull();
+  });
+
+  it("rejects a different origin", () => {
+    expect(resolveNavigationTarget("https://evil.example.com/", CURRENT_PAGE)).toBeNull();
   });
 });

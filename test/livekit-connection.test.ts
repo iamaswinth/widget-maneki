@@ -26,9 +26,15 @@ vi.mock("livekit-client", () => ({
     TranscriptionReceived: "transcriptionReceived",
   },
   Track: { Kind: { Audio: "audio", Video: "video" } },
+  // Mirrors @livekit/protocol's ParticipantInfo_Kind. The server assigns this
+  // from the joining token's grants — a participant can't set its own.
+  ParticipantKind: { STANDARD: 0, INGRESS: 1, EGRESS: 2, SIP: 3, AGENT: 4 },
 }));
 
 import { connectToRoom } from "../src/livekit-connection";
+
+const AGENT_SENDER = { kind: 4 };
+const VISITOR_SENDER = { kind: 0 };
 
 function getHandler(eventName: string): (...args: unknown[]) => void {
   const call = mockOn.mock.calls.find(([name]) => name === eventName);
@@ -93,7 +99,7 @@ describe("connectToRoom", () => {
     await connectToRoom("wss://lk.example.com", "jwt-abc", h);
 
     const payload = new TextEncoder().encode(JSON.stringify({ type: "navigate", target: "#pricing" }));
-    getHandler("dataReceived")(payload);
+    getHandler("dataReceived")(payload, AGENT_SENDER);
 
     expect(h.onDataMessage).toHaveBeenCalledWith({ type: "navigate", target: "#pricing" });
   });
@@ -103,8 +109,46 @@ describe("connectToRoom", () => {
     await connectToRoom("wss://lk.example.com", "jwt-abc", h);
 
     const badPayload = new TextEncoder().encode("not json");
-    expect(() => getHandler("dataReceived")(badPayload)).not.toThrow();
+    expect(() => getHandler("dataReceived")(badPayload, AGENT_SENDER)).not.toThrow();
     expect(h.onDataMessage).not.toHaveBeenCalled();
+  });
+
+  describe("data-channel sender identity", () => {
+    // navigate/interrupt drive the host page, so a message from anyone but the
+    // voice-runtime agent must not be acted on.
+    const navigatePayload = () =>
+      new TextEncoder().encode(JSON.stringify({ type: "navigate", target: "https://evil.example.com" }));
+
+    it("ignores a message from another visitor in the room", async () => {
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(navigatePayload(), VISITOR_SENDER);
+
+      expect(h.onDataMessage).not.toHaveBeenCalled();
+    });
+
+    it("ignores a packet with no participant at all", async () => {
+      // Server-originated data, or anything LiveKit can't attribute.
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(navigatePayload(), undefined);
+
+      expect(h.onDataMessage).not.toHaveBeenCalled();
+    });
+
+    it("still accepts the agent", async () => {
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(
+        new TextEncoder().encode(JSON.stringify({ type: "interrupt" })),
+        AGENT_SENDER
+      );
+
+      expect(h.onDataMessage).toHaveBeenCalledWith({ type: "interrupt" });
+    });
   });
 
   it("invokes onDisconnected for an unexpected room disconnect", async () => {

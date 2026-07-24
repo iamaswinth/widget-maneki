@@ -26,9 +26,13 @@ originally lived there is superseded, its build already shipped).
   single ES module (`formats: ["es"]` in `vite.config.ts`), not `iife`/`umd` — Rollup can't
   code-split a single-file bundle, which would force `livekit-client` to be inlined into the
   main file. Embed snippet is `<script type="module" src="...">`, not a plain `<script src>`.
-- `sessionStorage`-backed `session_id`, forwarded through `POST /widget/token` to become the
-  voice runtime's LangGraph `thread_id` — lets a visitor's conversation survive a same-tab
-  cross-page navigation the agent itself triggers.
+- `sessionStorage`-backed **visitor grant** (`src/session.ts`) — an opaque, gateway-signed
+  blob replayed on every `POST /widget/token`. The `visitor_id`/`session_id` inside it are
+  minted server-side (the latter becomes the voice runtime's LangGraph `thread_id`), which
+  is what lets a visitor's conversation survive a same-tab cross-page navigation the agent
+  itself triggers. **The widget never generates or sends either id directly** — when it
+  did, any caller could name another visitor's session and have the agent resume their
+  conversation. See `api-gateway/app/widget/grant.py`.
 
 ## Commands
 
@@ -48,6 +52,14 @@ it (`npx serve .`) and navigate to `/examples/`. Use the on-page buttons or
 
 - Every network call needs a defined failure UI state — this code runs inside someone else's
   web page, so a silent hang or an uncaught exception is not acceptable.
+- **Data-channel messages are only acted on if the sender is the agent** (`kind ===
+  ParticipantKind.AGENT`, assigned by the LiveKit server, not self-reported). `navigate`
+  and `interrupt` drive the host page; another participant in the room must not be able to.
+- **Never assign a data-channel-supplied value to `location.href` unchecked.** Navigation
+  targets go through `resolveNavigationTarget` (http(s) scheme + same origin), and the
+  parsed URL it returns is what gets assigned — not the original string. A `javascript:`
+  target would otherwise execute on the tenant's own page, and an off-origin one is an open
+  redirect. Targets trace back to crawled page content, so they are not trusted input.
 - Nothing outside `src/` global scope may be assumed available or safe to mutate.
 - `handleTapToTalk` (or its Session 2+ replacement) is the boundary between the always-loaded
   shell and the lazily-loaded `livekit-client` — don't import `livekit-client` at module top

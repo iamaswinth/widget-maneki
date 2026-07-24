@@ -62,11 +62,24 @@ function submitText(el: ManekiWidgetElement, text: string): void {
   form.dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
 }
 
+function textToggleButton(el: ManekiWidgetElement): HTMLButtonElement {
+  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.text-toggle")!;
+}
+
+function revealTextInput(el: ManekiWidgetElement): void {
+  textToggleButton(el).click();
+}
+
 function label(el: ManekiWidgetElement): string {
   return el.shadowRoot!.querySelector(".label")!.textContent!;
 }
 
-const TOKEN_RESPONSE = { token: "jwt", livekit_url: "wss://lk.example.com", room: "room-1" };
+const TOKEN_RESPONSE = {
+  token: "jwt",
+  livekit_url: "wss://lk.example.com",
+  room: "room-1",
+  grant: "grant-issued",
+};
 
 beforeEach(() => {
   document.body.innerHTML = "";
@@ -161,7 +174,7 @@ describe("tap-to-talk orchestration", () => {
     await vi.waitFor(() => expect(el.state).toBe("listening"));
   });
 
-  it("sends the sessionStorage session_id in the token request", async () => {
+  it("sends no grant on a first visit, then persists the one it gets back", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
     mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
 
@@ -169,11 +182,26 @@ describe("tap-to-talk orchestration", () => {
     click(el);
     await vi.waitFor(() => expect(el.state).toBe("listening"));
 
-    const sessionId = window.sessionStorage.getItem("maneki_session_id");
-    expect(sessionId).toBeTruthy();
     expect(mockRequestWidgetToken).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ sessionId })
+      expect.objectContaining({ grant: undefined })
+    );
+    // Persisting it is what lets the next page resume this conversation.
+    expect(window.sessionStorage.getItem("maneki_visitor_grant")).toBe("grant-issued");
+  });
+
+  it("replays the stored grant on a later connect", async () => {
+    window.sessionStorage.setItem("maneki_visitor_grant", "grant-from-earlier");
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockRequestWidgetToken).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ grant: "grant-from-earlier" })
     );
   });
 
@@ -256,7 +284,7 @@ describe("data-channel message dispatch", () => {
 
 describe("cross-page session resume", () => {
   it("auto-reconnects on mount when the pending-navigation flag is set", async () => {
-    window.sessionStorage.setItem("maneki_session_id", "sess-existing");
+    window.sessionStorage.setItem("maneki_visitor_grant", "grant-existing");
     window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
     mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
@@ -265,9 +293,11 @@ describe("cross-page session resume", () => {
 
     // No click — mounting alone should have kicked off the connection.
     await vi.waitFor(() => expect(el.state).toBe("listening"));
+    // The grant surviving the navigation is what carries the conversation
+    // across the page load; the flag only decides whether to reconnect now.
     expect(mockRequestWidgetToken).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ sessionId: "sess-existing" })
+      expect.objectContaining({ grant: "grant-existing" })
     );
   });
 
@@ -474,6 +504,7 @@ describe("text input", () => {
     const el = mountWidget();
     expect(el.state).toBe("idle");
 
+    revealTextInput(el);
     submitText(el, "how much does it cost?");
     await vi.waitFor(() => expect(el.state).toBe("listening"));
 
@@ -491,6 +522,7 @@ describe("text input", () => {
     await vi.waitFor(() => expect(el.state).toBe("listening"));
     mockRequestWidgetToken.mockClear();
 
+    revealTextInput(el);
     submitText(el, "what about the FAQ?");
     await vi.waitFor(() => expect(mockSendText).toHaveBeenCalledWith("what about the FAQ?"));
 
@@ -500,6 +532,7 @@ describe("text input", () => {
   it("is a no-op for empty or whitespace-only input", async () => {
     const el = mountWidget();
 
+    revealTextInput(el);
     submitText(el, "   ");
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -511,6 +544,7 @@ describe("text input", () => {
     mockRequestWidgetToken.mockRejectedValue(new FakeWidgetTokenError(500, "boom"));
 
     const el = mountWidget();
+    revealTextInput(el);
     submitText(el, "hello?");
 
     await vi.waitFor(() => expect(el.state).toBe("error"));
@@ -522,11 +556,56 @@ describe("text input", () => {
     mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendText: vi.fn() });
 
     const el = mountWidget();
+    revealTextInput(el);
     submitText(el, "hello");
     await vi.waitFor(() => expect(el.state).toBe("listening"));
 
     const input = el.shadowRoot!.querySelector<HTMLInputElement>(".text-input")!;
     expect(input.value).toBe("");
+  });
+});
+
+describe("text input toggle", () => {
+  it("hides the text form and shows the default toggle label on a fresh mount", () => {
+    const el = mountWidget();
+
+    expect(el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!.style.display).toBe("none");
+    expect(textToggleButton(el).textContent).toMatch(/prefer to type/i);
+  });
+
+  it("reveals the text form and focuses the input on tap", () => {
+    const el = mountWidget();
+
+    revealTextInput(el);
+
+    const form = el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!;
+    expect(form.style.display).not.toBe("none");
+    expect(el.shadowRoot!.activeElement).toBe(el.shadowRoot!.querySelector(".text-input"));
+    expect(textToggleButton(el).textContent).toMatch(/hide/i);
+  });
+
+  it("collapses the text form again on a second tap", () => {
+    const el = mountWidget();
+
+    revealTextInput(el);
+    revealTextInput(el);
+
+    const form = el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!;
+    expect(form.style.display).toBe("none");
+    expect(textToggleButton(el).textContent).toMatch(/prefer to type/i);
+  });
+
+  it("stays revealed across a state transition instead of collapsing on connect", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+
+    const el = mountWidget();
+    revealTextInput(el);
+
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(el.shadowRoot!.querySelector<HTMLFormElement>(".text-form")!.style.display).not.toBe("none");
   });
 });
 
@@ -607,21 +686,21 @@ describe("hangup", () => {
     }
   });
 
-  it("leaves the sessionStorage session_id untouched after a confirmed hangup", async () => {
+  it("leaves the sessionStorage grant untouched after a confirmed hangup", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
     mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn().mockResolvedValue(undefined) });
 
     const el = mountWidget();
     click(el);
     await vi.waitFor(() => expect(el.state).toBe("listening"));
-    const sessionId = window.sessionStorage.getItem("maneki_session_id");
-    expect(sessionId).toBeTruthy();
+    const storedGrant = window.sessionStorage.getItem("maneki_visitor_grant");
+    expect(storedGrant).toBeTruthy();
 
     clickHangup(el);
     clickHangup(el);
     await vi.waitFor(() => expect(el.state).toBe("idle"));
 
-    expect(window.sessionStorage.getItem("maneki_session_id")).toBe(sessionId);
+    expect(window.sessionStorage.getItem("maneki_visitor_grant")).toBe(storedGrant);
   });
 
   it("resets the armed state instead of leaving a stale confirm label after an unexpected disconnect", async () => {

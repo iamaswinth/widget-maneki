@@ -2,7 +2,7 @@ import { isMicPermissionDenied } from "./errors";
 import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
 import { connectToRoom, DataMessage, LiveKitConnection } from "./livekit-connection";
 import { handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
-import { getOrCreateSessionId } from "./session";
+import { readGrant, storeGrant } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
 
 const STATE_LABELS: Record<WidgetState, string> = {
@@ -105,6 +105,15 @@ const STYLE = `
   .hangup[data-armed="true"] {
     background: #dc2626;
   }
+  .text-toggle {
+    font-size: 11px;
+    padding: 2px 4px;
+    border: none;
+    background: none;
+    color: #6b7280;
+    text-decoration: underline;
+    cursor: pointer;
+  }
 `;
 
 /** The widget's Custom Element shell.
@@ -122,6 +131,8 @@ export class ManekiWidgetElement extends HTMLElement {
   private orbEl!: HTMLButtonElement;
   private labelEl!: HTMLSpanElement;
   private textInputEl!: HTMLInputElement;
+  private textFormEl!: HTMLFormElement;
+  private textToggleEl!: HTMLButtonElement;
   private hangupEl!: HTMLButtonElement;
   private audioContainer!: HTMLDivElement;
   private connection: LiveKitConnection | null = null;
@@ -130,6 +141,7 @@ export class ManekiWidgetElement extends HTMLElement {
   private reconnectAttempted = false;
   private hangupArmed = false;
   private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
+  private textInputRevealed = false;
 
   connectedCallback(): void {
     const siteId = this.getAttribute("site-id");
@@ -163,13 +175,21 @@ export class ManekiWidgetElement extends HTMLElement {
     this.hangupEl.type = "button";
     this.hangupEl.addEventListener("click", () => this.handleHangupTap());
 
-    // Testing/accessibility fallback alongside the mic — typed text drives
-    // the identical backend pipeline as a transcribed voice turn (LiveKit
-    // Agents' built-in "lk.chat" text-stream handler calls the same
-    // generate_reply() a confirmed voice utterance does — see
-    // livekit-connection.ts's CHAT_TOPIC comment).
-    const textForm = document.createElement("form");
-    textForm.className = "text-form";
+    // Accessibility/no-mic fallback alongside the voice orb — typed text
+    // drives the identical backend pipeline as a transcribed voice turn
+    // (LiveKit Agents' built-in "lk.chat" text-stream handler calls the
+    // same generate_reply() a confirmed voice utterance does — see
+    // livekit-connection.ts's CHAT_TOPIC comment). Collapsed behind a
+    // toggle by default (see textInputRevealed/handleTextToggle) so it
+    // reads as a deliberate secondary channel rather than a second,
+    // competing input method shown to every visitor.
+    this.textToggleEl = document.createElement("button");
+    this.textToggleEl.type = "button";
+    this.textToggleEl.className = "text-toggle";
+    this.textToggleEl.addEventListener("click", () => this.handleTextToggle());
+
+    this.textFormEl = document.createElement("form");
+    this.textFormEl.className = "text-form";
     this.textInputEl = document.createElement("input");
     this.textInputEl.type = "text";
     this.textInputEl.className = "text-input";
@@ -179,9 +199,9 @@ export class ManekiWidgetElement extends HTMLElement {
     sendBtn.type = "submit";
     sendBtn.className = "text-send";
     sendBtn.textContent = "Send";
-    textForm.appendChild(this.textInputEl);
-    textForm.appendChild(sendBtn);
-    textForm.addEventListener("submit", (ev) => {
+    this.textFormEl.appendChild(this.textInputEl);
+    this.textFormEl.appendChild(sendBtn);
+    this.textFormEl.addEventListener("submit", (ev) => {
       ev.preventDefault();
       const text = this.textInputEl.value;
       this.textInputEl.value = "";
@@ -194,7 +214,8 @@ export class ManekiWidgetElement extends HTMLElement {
     wrap.appendChild(this.orbEl);
     wrap.appendChild(this.labelEl);
     wrap.appendChild(this.hangupEl);
-    wrap.appendChild(textForm);
+    wrap.appendChild(this.textToggleEl);
+    wrap.appendChild(this.textFormEl);
     shadow.appendChild(wrap);
     shadow.appendChild(this.audioContainer);
 
@@ -206,7 +227,7 @@ export class ManekiWidgetElement extends HTMLElement {
 
   /** If the agent triggered a cross-page navigation last page load,
    * navigation.ts marked this flag right before the location.href
-   * assignment. sessionStorage's session_id already survived the
+   * assignment. The sessionStorage grant already survived the
    * navigation on its own; this flag is what decides whether to
    * immediately reconnect on it, rather than waiting for another tap —
    * the visitor already opted in once, this page load is a continuation
@@ -270,8 +291,8 @@ export class ManekiWidgetElement extends HTMLElement {
   /** Visitor-initiated hangup — the only path (besides the element being
    * removed from the DOM, see disconnectedCallback) that intentionally
    * disconnects and returns to idle. Deliberately leaves the sessionStorage
-   * session_id alone: it exists so a conversation can resume on a later
-   * tap, and ending one call shouldn't burn that continuity. */
+   * grant alone: it exists so a conversation can resume on a later tap, and
+   * ending one call shouldn't burn that continuity. */
   private async endCall(): Promise<void> {
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
@@ -281,6 +302,16 @@ export class ManekiWidgetElement extends HTMLElement {
     this.errorMessage = null;
     this.hangupArmed = false;
     this.setState("idle");
+  }
+
+  /** Reveals/collapses the text-input fallback. Deliberately independent of
+   * call state — once a visitor opts into typing, it stays revealed across
+   * connecting/listening/speaking/error rather than re-hiding itself and
+   * forcing them to rediscover the toggle after every turn. */
+  private handleTextToggle(): void {
+    this.textInputRevealed = !this.textInputRevealed;
+    this.render(this.state);
+    if (this.textInputRevealed) this.textInputEl.focus();
   }
 
   /** Connects first (same flow as tap-to-talk) if not already connected,
@@ -324,12 +355,19 @@ export class ManekiWidgetElement extends HTMLElement {
 
     this.setState("connecting");
     try {
-      const sessionId = getOrCreateSessionId();
-      const { token, livekit_url: livekitUrl } = await requestWidgetToken(gatewayUrl, {
+      const {
+        token,
+        livekit_url: livekitUrl,
+        grant,
+      } = await requestWidgetToken(gatewayUrl, {
         siteId,
-        sessionId,
         pageUrl: window.location.href,
+        grant: readGrant() ?? undefined,
       });
+      // Stored before connecting, not after: the grant is what makes the next
+      // page's request resume this same conversation, and a failure between
+      // here and a successful join shouldn't cost the visitor their identity.
+      storeGrant(grant);
 
       this.connection = await connectToRoom(livekitUrl, token, {
         onRemoteAudio: (audioEl) => {
@@ -454,5 +492,10 @@ export class ManekiWidgetElement extends HTMLElement {
     const hangupLabel = this.hangupArmed ? "Confirm end call?" : "End call";
     this.hangupEl.textContent = hangupLabel;
     this.hangupEl.setAttribute("aria-label", hangupLabel);
+
+    const toggleLabel = this.textInputRevealed ? "Hide typing" : "⌨ Prefer to type?";
+    this.textToggleEl.textContent = toggleLabel;
+    this.textToggleEl.setAttribute("aria-label", this.textInputRevealed ? "Hide text input" : "Show text input");
+    this.textFormEl.style.display = this.textInputRevealed ? "" : "none";
   }
 }

@@ -45,7 +45,7 @@ export async function connectToRoom(
   token: string,
   handlers: ConnectToRoomHandlers
 ): Promise<LiveKitConnection> {
-  const { Room, RoomEvent, Track } = await import("livekit-client");
+  const { Room, RoomEvent, Track, ParticipantKind } = await import("livekit-client");
 
   const room = new Room();
   let intentionalDisconnect = false;
@@ -56,7 +56,17 @@ export async function connectToRoom(
     }
   });
 
-  room.on(RoomEvent.DataReceived, (payload: Uint8Array) => {
+  room.on(RoomEvent.DataReceived, (payload: Uint8Array, participant?: { kind?: unknown }) => {
+    // These messages drive navigation and barge-in on the host page, so who
+    // sent them matters as much as what they say. `kind` is assigned by the
+    // LiveKit server from the joining token's grants, not self-reported, so
+    // another participant in the room can't claim to be the agent. Anything
+    // else — a second visitor, or a server-originated packet with no
+    // participant at all — is dropped.
+    if (!participant || participant.kind !== ParticipantKind.AGENT) {
+      console.warn("<maneki-widget> ignoring a data-channel message from a non-agent sender");
+      return;
+    }
     try {
       const message = JSON.parse(new TextDecoder().decode(payload)) as DataMessage;
       handlers.onDataMessage(message);
