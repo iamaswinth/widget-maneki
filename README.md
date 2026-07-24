@@ -9,11 +9,18 @@ architecture and `../CLAUDE.md` for how it fits with the rest of the stack.
 ## Embedding
 
 ```html
-<script type="module"
-        src="https://YOUR_CDN/v1/maneki-widget.js"
-        site-id="acme"></script>
+<script type="module" src="https://YOUR_CDN/v1/maneki-widget.js"></script>
 <maneki-widget site-id="acme"></maneki-widget>
 ```
+
+**Both tags are required.** The script only registers the custom element
+(`src/index.ts`); it does not inject one. Attributes go on `<maneki-widget>`, never on the
+`<script>` tag, where they are ignored.
+
+> Worth improving: most embed products are a single self-injecting script tag. Reading
+> `data-site-id` off the script element and mounting automatically would make this
+> one line and pasteable by a non-technical customer. Note `document.currentScript` is
+> `null` for module scripts, so that lookup has to go via `import.meta.url`.
 
 `type="module"` is required — the build is an ES module so that `livekit-client` (733 KB)
 can be code-split and fetched lazily on tap-to-talk rather than on page load. A plain
