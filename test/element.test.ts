@@ -41,12 +41,13 @@ describe("<maneki-widget> rendering", () => {
     expect(el.shadowRoot).toBeNull();
   });
 
-  it("renders a Shadow DOM with an orb button and a label when configured", () => {
+  it("renders a Shadow DOM with a visualizer button and a label when configured", () => {
     const el = mountWidget();
     const shadow = el.shadowRoot!;
     expect(shadow).not.toBeNull();
-    expect(shadow.querySelector("button.orb")).not.toBeNull();
+    expect(shadow.querySelector("button.visualizer")).not.toBeNull();
     expect(shadow.querySelector(".label")).not.toBeNull();
+    expect(shadow.querySelectorAll(".ring .bar").length).toBe(28);
   });
 
   it("starts in the idle state with the idle label", () => {
@@ -66,21 +67,23 @@ describe("<maneki-widget> rendering", () => {
 
     expect(el.state).toBe(state);
     expect(el.shadowRoot!.querySelector(".label")!.textContent).toBe(label);
-    expect(el.shadowRoot!.querySelector("button.orb")!.getAttribute("data-state")).toBe(state);
+    expect(el.shadowRoot!.querySelector("button.visualizer")!.getAttribute("data-state")).toBe(state);
   });
 
   it("is encapsulated: shadow-internal elements are unreachable from a light-DOM query", () => {
     mountWidget();
-    // .orb only exists inside the widget's shadow root — a host-page-style
-    // querySelector must not be able to reach it, proving the boundary.
-    expect(document.querySelector(".orb")).toBeNull();
+    // .visualizer/.ring only exist inside the widget's shadow root — a
+    // host-page-style querySelector must not be able to reach them, proving
+    // the boundary.
+    expect(document.querySelector(".visualizer")).toBeNull();
+    expect(document.querySelector(".ring")).toBeNull();
     expect(document.querySelector(".label")).toBeNull();
   });
 
   it("the widget's own <style> lives inside its shadow root, not the document", () => {
     mountWidget();
     const styleInDocument = Array.from(document.querySelectorAll("style")).some((s) =>
-      s.textContent?.includes("button.orb")
+      s.textContent?.includes("button.visualizer")
     );
     expect(styleInDocument).toBe(false);
   });

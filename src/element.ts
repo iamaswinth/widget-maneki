@@ -1,7 +1,14 @@
+import { type AudioLevelSampler, createFrequencySampler } from "./audio-level";
 import { isMicPermissionDenied } from "./errors";
 import { requestWidgetToken, WidgetTokenError } from "./gateway-client";
-import { connectToRoom, DataMessage, LiveKitConnection } from "./livekit-connection";
+import {
+  type AudioProbeKind,
+  connectToRoom,
+  DataMessage,
+  LiveKitConnection,
+} from "./livekit-connection";
 import { handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
+import { DEFAULT_BAR_COUNT, createRadialVisualizer, type RadialVisualizer } from "./radial-visualizer";
 import { readGrant, storeGrant } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
 
@@ -13,8 +20,13 @@ const STATE_LABELS: Record<WidgetState, string> = {
   error: "Something went wrong",
 };
 
+// Also doubles as the visualizer ring's --mw-bar-color. The ring has no
+// backing disc of its own (see button.visualizer below) — it sits directly
+// on whatever the host page's background is, so these are a compromise
+// rather than tuned against one known background; idle's mid-grey in
+// particular may read faint on a light host page.
 const STATE_COLORS: Record<WidgetState, string> = {
-  idle: "#4b5563",
+  idle: "#9ca3af",
   connecting: "#a855f7",
   listening: "#22c55e",
   speaking: "#3b82f6",
@@ -44,25 +56,83 @@ const STYLE = `
     align-items: center;
     gap: 8px;
   }
-  button.orb {
+  button.visualizer {
     width: 64px;
     height: 64px;
-    border-radius: 50%;
+    padding: 0;
     border: none;
+    background: none;
     cursor: pointer;
-    transition: background-color 200ms ease, transform 150ms ease;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25);
+    display: block;
+    transition: transform 150ms ease;
   }
-  button.orb:active {
+  button.visualizer:active {
     transform: scale(0.95);
   }
-  button.orb[data-state="connecting"],
-  button.orb[data-state="listening"] {
-    animation: pulse 1.4s ease-in-out infinite;
+  /* :host{all:initial} plus a fully custom, unfilled button means the UA
+     focus ring may not show at all — make it explicit for keyboard users.
+     A dark outline so it also reads against a light host page, now that
+     there's no dark disc guaranteeing contrast underneath it. */
+  button.visualizer:focus-visible {
+    outline: 2px solid #1f2937;
+    outline-offset: 4px;
   }
-  @keyframes pulse {
-    0%, 100% { box-shadow: 0 2px 12px rgba(0, 0, 0, 0.25); }
-    50% { box-shadow: 0 2px 24px rgba(0, 0, 0, 0.4); }
+  .ring {
+    /* Every --mw-* is defaulted here, not inherited: :host{all:initial}
+       does NOT reset custom properties (per spec), so a host page's own
+       --mw-l or --mw-color would otherwise reach these bars. */
+    --mw-l: 0;
+    --mw-a: 0deg;
+    --mw-bar-color: #9ca3af;
+    --mw-bar-w: 3px;
+    --mw-bar-min: 3px;
+    --mw-bar-max: 14px;
+    --mw-ring-r: 15px;
+    position: relative;
+    width: 64px;
+    height: 64px;
+    pointer-events: none;
+    contain: layout style;
+  }
+  .ring .bar {
+    position: absolute;
+    left: 50%;
+    /* bottom (not top) pins the inner end to the exact ring centre at ANY
+       height — with top:50% the transform-origin would move as height
+       changes and every bar would drift outward as it grew. */
+    bottom: 50%;
+    width: var(--mw-bar-w);
+    margin-left: calc(var(--mw-bar-w) / -2);
+    height: calc(var(--mw-bar-min) + var(--mw-l) * (var(--mw-bar-max) - var(--mw-bar-min)));
+    border-radius: calc(var(--mw-bar-w) / 2);
+    background: var(--mw-bar-color);
+    transform-origin: 50% 100%;
+    transform: rotate(var(--mw-a)) translateY(calc(-1 * var(--mw-ring-r)));
+    will-change: height;
+  }
+  /* Compositor-only flourishes: zero JS, so the rAF loop stays OFF at idle. */
+  .ring[data-state="idle"] {
+    animation: mw-breathe 3s ease-in-out infinite;
+  }
+  .ring[data-state="speaking"] {
+    animation: mw-spin 8s linear infinite;
+  }
+  .ring[data-state="error"] {
+    opacity: 0.6;
+  }
+  .ring[data-muted="true"] {
+    opacity: 0.5;
+  }
+  @keyframes mw-breathe {
+    0%, 100% { opacity: 0.75; }
+    50% { opacity: 1; }
+  }
+  @keyframes mw-spin {
+    to { transform: rotate(360deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ring { animation: none; }
+    button.visualizer { transition: none; }
   }
   .label {
     font-size: 12px;
@@ -72,6 +142,49 @@ const STYLE = `
     border-radius: 6px;
     max-width: 220px;
     text-align: center;
+  }
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 999px;
+    background: #111827;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  }
+  button.ctl {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font: inherit;
+    font-size: 12px;
+    line-height: 1;
+    padding: 6px 8px;
+    border: none;
+    border-radius: 999px;
+    background: transparent;
+    color: #e5e7eb;
+    cursor: pointer;
+  }
+  button.ctl:hover {
+    background: rgba(255, 255, 255, 0.1);
+  }
+  button.ctl:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: 1px;
+  }
+  button.ctl.mic[data-muted="true"] {
+    color: #f87171;
+  }
+  button.ctl.chat[data-open="true"] {
+    background: rgba(255, 255, 255, 0.16);
+  }
+  button.ctl.leave {
+    color: #fdba74;
+  }
+  button.ctl.leave[data-armed="true"] {
+    background: #dc2626;
+    color: #fff;
   }
   .text-form {
     display: flex;
@@ -93,27 +206,6 @@ const STYLE = `
     color: #fff;
     cursor: pointer;
   }
-  .hangup {
-    font-size: 12px;
-    padding: 4px 10px;
-    border-radius: 6px;
-    border: none;
-    background: #f97316;
-    color: #fff;
-    cursor: pointer;
-  }
-  .hangup[data-armed="true"] {
-    background: #dc2626;
-  }
-  .text-toggle {
-    font-size: 11px;
-    padding: 2px 4px;
-    border: none;
-    background: none;
-    color: #6b7280;
-    text-decoration: underline;
-    cursor: pointer;
-  }
 `;
 
 /** The widget's Custom Element shell.
@@ -128,8 +220,10 @@ const STYLE = `
 export class ManekiWidgetElement extends HTMLElement {
   private stateMachine = new WidgetStateMachine();
   private unsubscribe: (() => void) | null = null;
-  private orbEl!: HTMLButtonElement;
+  private vizEl!: HTMLButtonElement;
+  private visualizer: RadialVisualizer | null = null;
   private labelEl!: HTMLSpanElement;
+  private micEl!: HTMLButtonElement;
   private textInputEl!: HTMLInputElement;
   private textFormEl!: HTMLFormElement;
   private textToggleEl!: HTMLButtonElement;
@@ -142,6 +236,18 @@ export class ManekiWidgetElement extends HTMLElement {
   private hangupArmed = false;
   private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
   private textInputRevealed = false;
+  private micMuted = false;
+  // Per-source amplitude samplers, fed by connectToRoom's onAudioProbe. Map
+  // rather than two fields because a source may never arrive at all (no
+  // usable Web Audio, an older SDK build, or the AudioContext cap) — see
+  // livekit-connection.ts's AudioProbeHandler doc comment.
+  private samplers = new Map<AudioProbeKind, AudioLevelSampler>();
+  // Reused every frame — sampleAudio() must not allocate on the hot path.
+  private levels = new Float32Array(DEFAULT_BAR_COUNT);
+  private frameId: number | null = null;
+  private frameLoopBroken = false;
+  // Test/fixture-only bypass — see setSyntheticAudioLevel below.
+  private syntheticLevel: number | null = null;
 
   /** The gateway to talk to: the `gateway-url` attribute if present, else the
    * URL baked in at build time (see vite.config.ts). A released build carries
@@ -171,18 +277,25 @@ export class ManekiWidgetElement extends HTMLElement {
     const wrap = document.createElement("div");
     wrap.className = "wrap";
 
-    this.orbEl = document.createElement("button");
-    this.orbEl.className = "orb";
-    this.orbEl.setAttribute("aria-label", "Talk to us");
-    this.orbEl.addEventListener("click", () => this.handleTapToTalk());
+    this.vizEl = document.createElement("button");
+    this.vizEl.type = "button";
+    this.vizEl.className = "visualizer";
+    this.vizEl.setAttribute("aria-label", "Talk to us");
+    this.vizEl.addEventListener("click", () => this.handleTapToTalk());
+
+    this.visualizer = createRadialVisualizer(document);
+    this.vizEl.appendChild(this.visualizer.root);
 
     this.labelEl = document.createElement("span");
     this.labelEl.className = "label";
 
-    this.hangupEl = document.createElement("button");
-    this.hangupEl.className = "hangup";
-    this.hangupEl.type = "button";
-    this.hangupEl.addEventListener("click", () => this.handleHangupTap());
+    const controls = document.createElement("div");
+    controls.className = "controls";
+
+    this.micEl = document.createElement("button");
+    this.micEl.type = "button";
+    this.micEl.className = "ctl mic";
+    this.micEl.addEventListener("click", () => void this.handleMicTap());
 
     // Accessibility/no-mic fallback alongside the voice orb — typed text
     // drives the identical backend pipeline as a transcribed voice turn
@@ -194,8 +307,17 @@ export class ManekiWidgetElement extends HTMLElement {
     // competing input method shown to every visitor.
     this.textToggleEl = document.createElement("button");
     this.textToggleEl.type = "button";
-    this.textToggleEl.className = "text-toggle";
+    this.textToggleEl.className = "ctl chat";
     this.textToggleEl.addEventListener("click", () => this.handleTextToggle());
+
+    this.hangupEl = document.createElement("button");
+    this.hangupEl.className = "ctl leave";
+    this.hangupEl.type = "button";
+    this.hangupEl.addEventListener("click", () => this.handleHangupTap());
+
+    controls.appendChild(this.micEl);
+    controls.appendChild(this.textToggleEl);
+    controls.appendChild(this.hangupEl);
 
     this.textFormEl = document.createElement("form");
     this.textFormEl.className = "text-form";
@@ -220,10 +342,9 @@ export class ManekiWidgetElement extends HTMLElement {
     this.audioContainer = document.createElement("div");
     this.audioContainer.style.display = "none";
 
-    wrap.appendChild(this.orbEl);
+    wrap.appendChild(this.vizEl);
     wrap.appendChild(this.labelEl);
-    wrap.appendChild(this.hangupEl);
-    wrap.appendChild(this.textToggleEl);
+    wrap.appendChild(controls);
     wrap.appendChild(this.textFormEl);
     shadow.appendChild(wrap);
     shadow.appendChild(this.audioContainer);
@@ -254,6 +375,10 @@ export class ManekiWidgetElement extends HTMLElement {
   }
 
   disconnectedCallback(): void {
+    this.stopFrameLoop();
+    this.samplers.clear();
+    this.visualizer?.destroy();
+    this.visualizer = null;
     this.unsubscribe?.();
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
@@ -270,12 +395,38 @@ export class ManekiWidgetElement extends HTMLElement {
     return this.stateMachine.state;
   }
 
+  /** Test/fixture-only: feeds a synthetic 0..1 amplitude straight into the
+   * visualizer, bypassing any analyser. This is how examples/index.html —
+   * the project's only visual verification path — exercises
+   * amplitude-driven rendering with no gateway and no LiveKit room. Same
+   * status as setState above: not part of the embed API. Pass null to
+   * release it back to whatever real sampler (if any) is attached. */
+  setSyntheticAudioLevel(level: number | null): void {
+    this.syntheticLevel = level;
+  }
+
   protected async handleTapToTalk(): Promise<void> {
     // Only idle/error can start a connection — a tap while already
     // connecting/listening/speaking is a no-op, not a reconnect or hangup.
     if (this.state !== "idle" && this.state !== "error") return;
     this.reconnectAttempted = false;
     await this.attemptConnect();
+  }
+
+  /** Mute toggle — the mic is otherwise enabled for the whole call and
+   * never switchable. Only meaningful once connected; a tap while idle/
+   * connecting/error is a no-op since there's no track to mute yet. */
+  private async handleMicTap(): Promise<void> {
+    if (this.state !== "listening" && this.state !== "speaking") return;
+    if (!this.connection) return;
+
+    this.micMuted = !this.micMuted;
+    this.render(this.state);
+    try {
+      await this.connection.setMicrophoneEnabled(!this.micMuted);
+    } catch (err) {
+      console.error("<maneki-widget> failed to toggle the microphone:", err);
+    }
   }
 
   /** The hangup button requires two taps: the first "arms" it (and
@@ -310,6 +461,9 @@ export class ManekiWidgetElement extends HTMLElement {
     this.reconnectAttempted = false;
     this.errorMessage = null;
     this.hangupArmed = false;
+    this.samplers.clear();
+    this.syntheticLevel = null;
+    this.micMuted = false;
     this.setState("idle");
   }
 
@@ -388,6 +542,9 @@ export class ManekiWidgetElement extends HTMLElement {
         onDataMessage: (message) => this.handleDataMessage(message),
         onDisconnected: () => this.handleUnexpectedDisconnect(),
         onTranscription: (text, speaker) => console.log(`${speaker}> ${text}`),
+        onAudioProbe: (probe) => {
+          this.samplers.set(probe.kind, createFrequencySampler(probe.analyser));
+        },
       });
 
       this.setState("listening");
@@ -403,8 +560,12 @@ export class ManekiWidgetElement extends HTMLElement {
         // Config problem on the owner's side (unpublished tenant, or an
         // Origin that doesn't match what they configured) — no retry can
         // fix this, so disappear entirely rather than show a broken state
-        // on their site.
+        // on their site. The frame loop is running (state is "connecting"),
+        // and since the element stays in the DOM hidden rather than
+        // removed, disconnectedCallback never fires to stop it — without
+        // this explicit stop it would tick a hidden subtree forever.
         console.error("<maneki-widget> 403 from the gateway — hiding (site not published or Origin mismatch).");
+        this.stopFrameLoop();
         this.style.display = "none";
         return;
       }
@@ -435,6 +596,10 @@ export class ManekiWidgetElement extends HTMLElement {
   private handleUnexpectedDisconnect(): void {
     this.clearDispatchTimeout();
     this.connection = null;
+    // The old room's analysers point at a now-dead track; a reconnect (if
+    // one follows) registers fresh ones via onAudioProbe.
+    this.samplers.clear();
+    this.micMuted = false;
     if (this.reconnectAttempted) {
       this.errorMessage = "Connection lost — tap to reconnect.";
       this.setState("error");
@@ -487,9 +652,80 @@ export class ManekiWidgetElement extends HTMLElement {
     }
   }
 
+  /** Feeds the visualizer whichever source is relevant for the current
+   * state, once per frame. Deliberately never mixes local + remote: while
+   * the agent speaks, the visitor's own mic is picking up that same audio
+   * through their speakers, and mixing would make the ring react to the
+   * agent twice. Falls back to the other source (then to null, which
+   * computeBarMagnitudes renders as a calm shimmer) if the preferred one
+   * isn't available or has gone silent long enough to look broken. */
+  private sampleAudio(): void {
+    if (this.syntheticLevel !== null) {
+      this.visualizer?.setAudio({ bars: null, volume: this.syntheticLevel });
+      return;
+    }
+    const prefer: AudioProbeKind = this.state === "speaking" ? "remote" : "local";
+    const fallback: AudioProbeKind = prefer === "remote" ? "local" : "remote";
+    const sampler = this.samplers.get(prefer) ?? this.samplers.get(fallback);
+    const ok = sampler?.sample(this.levels) ?? false;
+    this.visualizer?.setAudio(ok ? { bars: this.levels, volume: null } : null);
+  }
+
+  /** Which states animate is a pure function of state (and mute) —
+   * re-derived on every render(), never driven from a transition handler.
+   * idle and error are deliberately STATIC (a compositor-only CSS animation
+   * covers idle's breathing look), so an embedded widget schedules ZERO
+   * animation frames for the entire time a visitor is not in a call. Muted
+   * while listening also schedules nothing — a muted mic has nothing to
+   * visualize — but muted while the agent is speaking still animates from
+   * the remote probe. */
+  private syncFrameLoop(state: WidgetState): void {
+    const animated =
+      state === "connecting" || state === "speaking" || (state === "listening" && !this.micMuted);
+    if (animated && !prefersReducedMotion()) {
+      this.startFrameLoop();
+    } else {
+      this.stopFrameLoop();
+    }
+  }
+
+  private startFrameLoop(): void {
+    if (this.frameId !== null || this.frameLoopBroken) return;
+    if (typeof requestAnimationFrame !== "function") return;
+    const frame = (t: number): void => {
+      try {
+        this.sampleAudio();
+        this.visualizer?.tick(t);
+      } catch (err) {
+        // Never let a frame throw into the host page, and never spin on a
+        // repeating throw — log once and stop rescheduling.
+        console.error("<maneki-widget> visualizer frame failed — animation stopped:", err);
+        this.frameId = null;
+        this.frameLoopBroken = true;
+        return;
+      }
+      this.frameId = requestAnimationFrame(frame);
+    };
+    this.frameId = requestAnimationFrame(frame);
+  }
+
+  private stopFrameLoop(): void {
+    if (this.frameId === null) return;
+    cancelAnimationFrame(this.frameId);
+    this.frameId = null;
+    // Settle to the resting pattern for the current state rather than
+    // freezing mid-sweep/mid-amplitude.
+    try {
+      this.visualizer?.tick(0);
+    } catch {
+      // Already logged by startFrameLoop's frame() if this is why it broke.
+    }
+  }
+
   private render(state: WidgetState): void {
-    this.orbEl.style.backgroundColor = STATE_COLORS[state];
-    this.orbEl.dataset.state = state;
+    this.vizEl.dataset.state = state;
+    this.visualizer?.setState(state, STATE_COLORS[state]);
+    this.visualizer?.setMuted(this.micMuted);
     this.labelEl.textContent = state === "error" && this.errorMessage ? this.errorMessage : STATE_LABELS[state];
 
     const active = state === "listening" || state === "speaking";
@@ -503,9 +739,25 @@ export class ManekiWidgetElement extends HTMLElement {
     this.hangupEl.textContent = hangupLabel;
     this.hangupEl.setAttribute("aria-label", hangupLabel);
 
+    this.micEl.style.display = active ? "" : "none";
+    this.micEl.dataset.muted = String(this.micMuted);
+    this.micEl.textContent = this.micMuted ? "🔇 Unmute" : "🎙 Mute";
+    this.micEl.setAttribute("aria-label", this.micMuted ? "Unmute microphone" : "Mute microphone");
+    this.micEl.setAttribute("aria-pressed", String(this.micMuted));
+
     const toggleLabel = this.textInputRevealed ? "Hide typing" : "⌨ Prefer to type?";
     this.textToggleEl.textContent = toggleLabel;
+    this.textToggleEl.dataset.open = String(this.textInputRevealed);
     this.textToggleEl.setAttribute("aria-label", this.textInputRevealed ? "Hide text input" : "Show text input");
     this.textFormEl.style.display = this.textInputRevealed ? "" : "none";
+
+    this.syncFrameLoop(state);
   }
+}
+
+/** jsdom implements no `matchMedia` at all, so the optional call here is
+ * load-bearing, not defensive noise — without it every element test would
+ * throw a TypeError the first time render() runs. */
+function prefersReducedMotion(): boolean {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
 }

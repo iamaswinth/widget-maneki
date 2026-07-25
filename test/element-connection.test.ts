@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { mockRequestWidgetToken, FakeWidgetTokenError } = vi.hoisted(() => {
   class FakeWidgetTokenError extends Error {
@@ -22,6 +22,18 @@ vi.mock("../src/livekit-connection", () => ({
 }));
 
 const mockHandleNavigate = vi.hoisted(() => vi.fn());
+
+// vitest's jsdom sets pretendToBeVisual: true, so requestAnimationFrame is
+// REAL here, and vi.useFakeTimers() (used below by several tests) fakes it
+// too — meaning the 8s dispatch-timeout tests would otherwise run ~240 real
+// visualizer frames each. This file tests orchestration, not animation: rAF
+// is stubbed globally so those tests stay fast and any tick() bug doesn't
+// surface as a confusing, unrelated failure. The rAF lifecycle itself is
+// asserted directly against these same stubs in its own describe block.
+const RAF_ID = 42;
+const mockRaf = vi.fn().mockReturnValue(RAF_ID);
+const mockCancelRaf = vi.fn();
+
 vi.mock("../src/navigation", async (importOriginal) => {
   // Only handleNavigate is mocked — PENDING_NAVIGATION_KEY must stay the
   // real exported value, since element.ts's auto-resume check reads it
@@ -44,15 +56,23 @@ function mountWidget(): ManekiWidgetElement {
 }
 
 function click(el: ManekiWidgetElement): void {
-  el.shadowRoot!.querySelector<HTMLButtonElement>("button.orb")!.click();
+  el.shadowRoot!.querySelector<HTMLButtonElement>("button.visualizer")!.click();
 }
 
 function hangupButton(el: ManekiWidgetElement): HTMLButtonElement {
-  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.hangup")!;
+  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.ctl.leave")!;
 }
 
 function clickHangup(el: ManekiWidgetElement): void {
   hangupButton(el).click();
+}
+
+function micButton(el: ManekiWidgetElement): HTMLButtonElement {
+  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.ctl.mic")!;
+}
+
+function clickMic(el: ManekiWidgetElement): void {
+  micButton(el).click();
 }
 
 function submitText(el: ManekiWidgetElement, text: string): void {
@@ -63,7 +83,7 @@ function submitText(el: ManekiWidgetElement, text: string): void {
 }
 
 function textToggleButton(el: ManekiWidgetElement): HTMLButtonElement {
-  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.text-toggle")!;
+  return el.shadowRoot!.querySelector<HTMLButtonElement>("button.ctl.chat")!;
 }
 
 function revealTextInput(el: ManekiWidgetElement): void {
@@ -96,6 +116,14 @@ beforeEach(() => {
     value: { getUserMedia: () => Promise.resolve({}) },
     configurable: true,
   });
+  mockRaf.mockClear();
+  mockCancelRaf.mockClear();
+  vi.stubGlobal("requestAnimationFrame", mockRaf);
+  vi.stubGlobal("cancelAnimationFrame", mockCancelRaf);
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("tap-to-talk orchestration", () => {
@@ -262,7 +290,7 @@ describe("data-channel message dispatch", () => {
     expect(mockHandleNavigate).not.toHaveBeenCalled();
   });
 
-  it("an interrupt message while speaking switches the orb back to listening", async () => {
+  it("an interrupt message while speaking switches the visualizer back to listening", async () => {
     const { el, handlers } = await connectAndCaptureHandlers();
     handlers.onRemoteAudio(document.createElement("audio"));
     expect(el.state).toBe("speaking");
@@ -728,5 +756,152 @@ describe("hangup", () => {
     click(el);
     await vi.waitFor(() => expect(el.state).toBe("listening"));
     expect(hangupButton(el).textContent).toMatch(/end call/i);
+  });
+});
+
+describe("visualizer animation lifecycle", () => {
+  it("schedules no animation frames while idle", () => {
+    mountWidget();
+    expect(mockRaf).not.toHaveBeenCalled();
+  });
+
+  it("starts the frame loop once listening and cancels it when the element is removed", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), setMicrophoneEnabled: vi.fn() });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockRaf).toHaveBeenCalled();
+
+    el.remove();
+
+    expect(mockCancelRaf).toHaveBeenCalledWith(RAF_ID);
+  });
+
+  it("passes onAudioProbe to connectToRoom", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), setMicrophoneEnabled: vi.fn() });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockConnectToRoom).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ onAudioProbe: expect.any(Function) })
+    );
+  });
+
+  it("feeding an audio probe does not throw and the ring stays intact", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    let handlers!: ConnectToRoomHandlers;
+    mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
+      handlers = h;
+      return { disconnect: vi.fn(), setMicrophoneEnabled: vi.fn() };
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    // Assert only that feeding a probe doesn't throw and the ring is
+    // structurally intact — never the animated values themselves, which
+    // would make this test flaky against future tuning of the motion math.
+    expect(() =>
+      handlers.onAudioProbe?.({
+        kind: "local",
+        analyser: { frequencyBinCount: 64, getByteFrequencyData: (a: Uint8Array) => a.fill(200) },
+        calculateVolume: () => 0.5,
+      })
+    ).not.toThrow();
+    expect(el.shadowRoot!.querySelectorAll(".ring .bar").length).toBe(28);
+  });
+
+  it("stops the frame loop when a 403 hides the widget", async () => {
+    mockRequestWidgetToken.mockRejectedValue(new FakeWidgetTokenError(403, "Origin not allowed"));
+
+    const el = mountWidget();
+    click(el);
+
+    await vi.waitFor(() => expect(el.style.display).toBe("none"));
+    // Regression guard: state is "connecting" (so the loop is running) at
+    // the moment of the 403, and the element stays in the DOM hidden rather
+    // than removed, so disconnectedCallback never fires to stop it — without
+    // an explicit stop here the loop would tick a hidden subtree forever.
+    expect(mockCancelRaf).toHaveBeenCalled();
+  });
+});
+
+describe("mic mute", () => {
+  it("is hidden while idle", () => {
+    const el = mountWidget();
+    expect(micButton(el).style.display).toBe("none");
+  });
+
+  it("shows once listening and toggles mute on tap", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockSetMicrophoneEnabled = vi.fn().mockResolvedValue(undefined);
+    mockConnectToRoom.mockResolvedValue({
+      disconnect: vi.fn(),
+      setMicrophoneEnabled: mockSetMicrophoneEnabled,
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(micButton(el).style.display).not.toBe("none");
+    expect(micButton(el).dataset.muted).toBe("false");
+
+    clickMic(el);
+    await vi.waitFor(() => expect(micButton(el).dataset.muted).toBe("true"));
+    expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false);
+
+    clickMic(el);
+    await vi.waitFor(() => expect(micButton(el).dataset.muted).toBe("false"));
+    expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it("stops the frame loop while muted and listening", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({
+      disconnect: vi.fn(),
+      setMicrophoneEnabled: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    mockCancelRaf.mockClear();
+
+    clickMic(el);
+    await vi.waitFor(() => expect(micButton(el).dataset.muted).toBe("true"));
+
+    expect(mockCancelRaf).toHaveBeenCalled();
+  });
+
+  it("resets after a confirmed hangup and a fresh connect", async () => {
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    mockConnectToRoom.mockResolvedValue({
+      disconnect: vi.fn().mockResolvedValue(undefined),
+      setMicrophoneEnabled: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    clickMic(el);
+    await vi.waitFor(() => expect(micButton(el).dataset.muted).toBe("true"));
+
+    clickHangup(el);
+    clickHangup(el);
+    await vi.waitFor(() => expect(el.state).toBe("idle"));
+
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+    expect(micButton(el).dataset.muted).toBe("false");
   });
 });
