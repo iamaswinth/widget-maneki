@@ -6,6 +6,7 @@ const mockDisconnect = vi.fn().mockResolvedValue(undefined);
 const mockSetMicrophoneEnabled = vi.fn().mockResolvedValue(undefined);
 const mockStartAudio = vi.fn().mockResolvedValue(undefined);
 const mockSendText = vi.fn().mockResolvedValue(undefined);
+const mockCreateAudioAnalyser = vi.fn();
 
 class FakeRoom {
   on = mockOn;
@@ -17,6 +18,11 @@ class FakeRoom {
 
 // Intercepts both the static type-only import in livekit-connection.ts and
 // the runtime dynamic import() it performs — vitest's vi.mock handles both.
+// Deliberately DOES export createAudioAnalyser (unlike
+// livekit-connection-no-analyser.test.ts, a separate file precisely because
+// vi.mock is file-scoped) so the "analyser available" paths below can be
+// exercised; the feature-detect in livekit-connection.ts is what protects
+// every test that doesn't set mockCreateAudioAnalyser up.
 vi.mock("livekit-client", () => ({
   Room: FakeRoom,
   RoomEvent: {
@@ -26,9 +32,16 @@ vi.mock("livekit-client", () => ({
     TranscriptionReceived: "transcriptionReceived",
   },
   Track: { Kind: { Audio: "audio", Video: "video" } },
+  // Mirrors @livekit/protocol's ParticipantInfo_Kind. The server assigns this
+  // from the joining token's grants — a participant can't set its own.
+  ParticipantKind: { STANDARD: 0, INGRESS: 1, EGRESS: 2, SIP: 3, AGENT: 4 },
+  createAudioAnalyser: mockCreateAudioAnalyser,
 }));
 
 import { connectToRoom } from "../src/livekit-connection";
+
+const AGENT_SENDER = { kind: 4 };
+const VISITOR_SENDER = { kind: 0 };
 
 function getHandler(eventName: string): (...args: unknown[]) => void {
   const call = mockOn.mock.calls.find(([name]) => name === eventName);
@@ -50,8 +63,10 @@ beforeEach(() => {
   mockConnect.mockClear();
   mockDisconnect.mockClear();
   mockSetMicrophoneEnabled.mockClear();
+  mockSetMicrophoneEnabled.mockResolvedValue(undefined);
   mockStartAudio.mockClear();
   mockSendText.mockClear();
+  mockCreateAudioAnalyser.mockReset();
 });
 
 describe("connectToRoom", () => {
@@ -93,7 +108,7 @@ describe("connectToRoom", () => {
     await connectToRoom("wss://lk.example.com", "jwt-abc", h);
 
     const payload = new TextEncoder().encode(JSON.stringify({ type: "navigate", target: "#pricing" }));
-    getHandler("dataReceived")(payload);
+    getHandler("dataReceived")(payload, AGENT_SENDER);
 
     expect(h.onDataMessage).toHaveBeenCalledWith({ type: "navigate", target: "#pricing" });
   });
@@ -103,8 +118,46 @@ describe("connectToRoom", () => {
     await connectToRoom("wss://lk.example.com", "jwt-abc", h);
 
     const badPayload = new TextEncoder().encode("not json");
-    expect(() => getHandler("dataReceived")(badPayload)).not.toThrow();
+    expect(() => getHandler("dataReceived")(badPayload, AGENT_SENDER)).not.toThrow();
     expect(h.onDataMessage).not.toHaveBeenCalled();
+  });
+
+  describe("data-channel sender identity", () => {
+    // navigate/interrupt drive the host page, so a message from anyone but the
+    // voice-runtime agent must not be acted on.
+    const navigatePayload = () =>
+      new TextEncoder().encode(JSON.stringify({ type: "navigate", target: "https://evil.example.com" }));
+
+    it("ignores a message from another visitor in the room", async () => {
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(navigatePayload(), VISITOR_SENDER);
+
+      expect(h.onDataMessage).not.toHaveBeenCalled();
+    });
+
+    it("ignores a packet with no participant at all", async () => {
+      // Server-originated data, or anything LiveKit can't attribute.
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(navigatePayload(), undefined);
+
+      expect(h.onDataMessage).not.toHaveBeenCalled();
+    });
+
+    it("still accepts the agent", async () => {
+      const h = handlers();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+
+      getHandler("dataReceived")(
+        new TextEncoder().encode(JSON.stringify({ type: "interrupt" })),
+        AGENT_SENDER
+      );
+
+      expect(h.onDataMessage).toHaveBeenCalledWith({ type: "interrupt" });
+    });
   });
 
   it("invokes onDisconnected for an unexpected room disconnect", async () => {
@@ -191,6 +244,136 @@ describe("connectToRoom", () => {
       await connection.sendText("how much does it cost?");
 
       expect(mockSendText).toHaveBeenCalledWith("how much does it cost?", { topic: "lk.chat" });
+    });
+  });
+
+  describe("setMicrophoneEnabled", () => {
+    it("reaches the room's local participant", async () => {
+      const connection = await connectToRoom("wss://lk.example.com", "jwt-abc", handlers());
+      mockSetMicrophoneEnabled.mockClear(); // clear the connect-time enable(true) call
+
+      await connection.setMicrophoneEnabled(false);
+
+      expect(mockSetMicrophoneEnabled).toHaveBeenCalledWith(false);
+    });
+  });
+
+  describe("audio probes", () => {
+    const FAKE_ANALYSER = { frequencyBinCount: 64, getByteFrequencyData: () => {} };
+    const FAKE_CALCULATE_VOLUME = () => 0.5;
+    const mockCleanup = vi.fn().mockResolvedValue(undefined);
+
+    beforeEach(() => {
+      mockCleanup.mockClear();
+      mockCreateAudioAnalyser.mockReturnValue({
+        analyser: FAKE_ANALYSER,
+        calculateVolume: FAKE_CALCULATE_VOLUME,
+        cleanup: mockCleanup,
+      });
+    });
+
+    it("does not call createAudioAnalyser at all when onAudioProbe is omitted", async () => {
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers());
+
+      expect(mockCreateAudioAnalyser).not.toHaveBeenCalled();
+    });
+
+    it("reports a local probe once the mic track is available", async () => {
+      mockSetMicrophoneEnabled.mockResolvedValue({ audioTrack: { kind: "audio" } });
+      const onAudioProbe = vi.fn();
+
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+
+      expect(onAudioProbe).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: "local", analyser: FAKE_ANALYSER })
+      );
+    });
+
+    it("does not report a local probe when setMicrophoneEnabled resolves no publication", async () => {
+      // Default beforeEach resolves undefined — the existing "no track"
+      // shape every other test in this file already relies on.
+      const onAudioProbe = vi.fn();
+
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+
+      expect(onAudioProbe).not.toHaveBeenCalled();
+    });
+
+    it("reports a remote probe when an audio track is subscribed", async () => {
+      const onAudioProbe = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+
+      getHandler("trackSubscribed")({ kind: "audio", attach: () => document.createElement("audio") });
+
+      expect(onAudioProbe).toHaveBeenCalledWith(expect.objectContaining({ kind: "remote" }));
+    });
+
+    it("does not probe a non-audio subscribed track", async () => {
+      const onAudioProbe = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+
+      getHandler("trackSubscribed")({ kind: "video", attach: vi.fn() });
+
+      expect(onAudioProbe).not.toHaveBeenCalled();
+    });
+
+    it("is non-fatal when createAudioAnalyser throws — connect still resolves, no probe fires", async () => {
+      mockSetMicrophoneEnabled.mockResolvedValue({ audioTrack: { kind: "audio" } });
+      mockCreateAudioAnalyser.mockImplementation(() => {
+        throw new Error("no AudioContext available");
+      });
+      const onAudioProbe = vi.fn();
+
+      await expect(
+        connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }))
+      ).resolves.toBeDefined();
+      expect(onAudioProbe).not.toHaveBeenCalled();
+    });
+
+    it("closes the superseded analyser when a track is republished", async () => {
+      const onAudioProbe = vi.fn();
+      await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+
+      getHandler("trackSubscribed")({ kind: "audio", attach: () => document.createElement("audio") });
+      getHandler("trackSubscribed")({ kind: "audio", attach: () => document.createElement("audio") });
+
+      expect(mockCleanup).toHaveBeenCalledTimes(1);
+      expect(onAudioProbe).toHaveBeenCalledTimes(2);
+    });
+
+    it("disconnect() still disconnects the room even when a probe's cleanup rejects", async () => {
+      mockCleanup.mockRejectedValue(new Error("cleanup boom"));
+      const onAudioProbe = vi.fn();
+      const connection = await connectToRoom("wss://lk.example.com", "jwt-abc", handlers({ onAudioProbe }));
+      getHandler("trackSubscribed")({ kind: "audio", attach: () => document.createElement("audio") });
+
+      await expect(connection.disconnect()).resolves.toBeUndefined();
+      expect(mockDisconnect).toHaveBeenCalled();
+    });
+
+    it("still suppresses onDisconnected for a self-initiated disconnect even though probe cleanup awaits first", async () => {
+      // A slow cleanup proves intentionalDisconnect is set BEFORE the first
+      // await in disconnect(), not after releaseProbes() resolves.
+      let resolveCleanup!: () => void;
+      mockCleanup.mockReturnValue(
+        new Promise<void>((resolve) => {
+          resolveCleanup = resolve;
+        })
+      );
+      const onAudioProbe = vi.fn();
+      const h = handlers({ onAudioProbe });
+      const connection = await connectToRoom("wss://lk.example.com", "jwt-abc", h);
+      getHandler("trackSubscribed")({ kind: "audio", attach: () => document.createElement("audio") });
+
+      const disconnectPromise = connection.disconnect();
+      // The real Room would fire this as a side effect of room.disconnect(),
+      // which — in this fake — hasn't even been called yet (it's awaiting
+      // releaseProbes() first). intentionalDisconnect must already be true.
+      getHandler("disconnected")();
+      resolveCleanup();
+      await disconnectPromise;
+
+      expect(h.onDisconnected).not.toHaveBeenCalled();
     });
   });
 });

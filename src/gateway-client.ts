@@ -2,13 +2,19 @@ export interface WidgetTokenResponse {
   token: string;
   livekit_url: string;
   room: string;
+  /** Opaque, gateway-signed. Persist it (session.ts) and send it back as
+   * `grant` next time or the visitor gets a new identity — and so a new
+   * conversation — on every page. */
+  grant: string;
 }
 
 export interface WidgetTokenParams {
   siteId: string;
-  sessionId: string;
   pageUrl?: string;
-  visitorId?: string;
+  /** From a previous response; omitted on a first visit. The visitor's
+   * visitor_id/session_id live inside it, signed — there is deliberately no
+   * way to pass either one directly. */
+  grant?: string;
 }
 
 /** Thrown for both HTTP error responses (status set from the response) and
@@ -36,9 +42,8 @@ export async function requestWidgetToken(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         site_id: params.siteId,
-        session_id: params.sessionId,
         page_url: params.pageUrl,
-        visitor_id: params.visitorId,
+        grant: params.grant,
       }),
     });
   } catch (err) {

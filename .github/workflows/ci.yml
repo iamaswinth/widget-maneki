@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      # `npm ci` (not `npm install`) so the lockfile is authoritative — this
+      # artifact runs on customers' sites, so the dependency set that was
+      # tested must be the dependency set that ships.
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
+
+      # A gate in its own right, not just a rehearsal: type errors that only
+      # surface during bundling, and Rollup failures like the chunk split
+      # silently collapsing, are invisible to tsc and vitest. Nothing should
+      # reach a release tag without this having passed.
+      - run: npm run build

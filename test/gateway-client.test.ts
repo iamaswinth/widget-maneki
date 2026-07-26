@@ -9,20 +9,26 @@ afterEach(() => {
 
 describe("requestWidgetToken", () => {
   it("posts the expected body and returns the parsed response", async () => {
+    const response = {
+      token: "jwt-abc",
+      livekit_url: "wss://lk.example.com",
+      room: "tenant-acme-xyz",
+      grant: "grant-abc",
+    };
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
-      json: async () => ({ token: "jwt-abc", livekit_url: "wss://lk.example.com", room: "tenant-acme-xyz" }),
+      json: async () => response,
     });
     vi.stubGlobal("fetch", fetchMock);
 
     const result = await requestWidgetToken(GATEWAY_URL, {
       siteId: "acme",
-      sessionId: "sess-1",
       pageUrl: "https://acme.example.com/pricing",
+      grant: "grant-from-last-page",
     });
 
-    expect(result).toEqual({ token: "jwt-abc", livekit_url: "wss://lk.example.com", room: "tenant-acme-xyz" });
+    expect(result).toEqual(response);
 
     expect(fetchMock).toHaveBeenCalledWith(
       `${GATEWAY_URL}/widget/token`,
@@ -31,10 +37,27 @@ describe("requestWidgetToken", () => {
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body).toEqual({
       site_id: "acme",
-      session_id: "sess-1",
       page_url: "https://acme.example.com/pricing",
-      visitor_id: undefined,
+      grant: "grant-from-last-page",
     });
+  });
+
+  it("sends no identity fields at all on a first visit", async () => {
+    // There is no client-supplied visitor_id/session_id to leak or forge —
+    // the gateway mints both. See api-gateway's app/widget/grant.py.
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: "t", livekit_url: "wss://lk", room: "r", grant: "g" }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestWidgetToken(GATEWAY_URL, { siteId: "acme" });
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body).not.toHaveProperty("visitor_id");
+    expect(body).not.toHaveProperty("session_id");
+    expect(body.grant).toBeUndefined();
   });
 
   it("throws WidgetTokenError with the response status on a non-ok response", async () => {
@@ -43,7 +66,7 @@ describe("requestWidgetToken", () => {
       vi.fn().mockResolvedValue({ ok: false, status: 403, json: async () => ({ detail: "Origin not allowed" }) })
     );
 
-    await expect(requestWidgetToken(GATEWAY_URL, { siteId: "acme", sessionId: "sess-1" })).rejects.toMatchObject({
+    await expect(requestWidgetToken(GATEWAY_URL, { siteId: "acme" })).rejects.toMatchObject({
       status: 403,
     });
   });
@@ -54,7 +77,7 @@ describe("requestWidgetToken", () => {
       vi.fn().mockRejectedValue(new TypeError("Failed to fetch"))
     );
 
-    const err = await requestWidgetToken(GATEWAY_URL, { siteId: "acme", sessionId: "sess-1" }).catch((e) => e);
+    const err = await requestWidgetToken(GATEWAY_URL, { siteId: "acme" }).catch((e) => e);
     expect(err).toBeInstanceOf(WidgetTokenError);
     expect(err.status).toBe(0);
   });

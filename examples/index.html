@@ -18,8 +18,10 @@
   <body>
     <h1>Maneki widget — manual test fixture</h1>
     <p>
-      The orb should appear fixed in the bottom-right corner. Use the buttons
-      below (or the browser console — <code>document.querySelector('maneki-widget').setState('listening')</code>)
+      The radial visualizer (a ring of bars replacing the old orb) should
+      appear fixed in the bottom-right corner. Use the buttons below (or the
+      browser console —
+      <code>document.querySelector('maneki-widget').setState('listening')</code>)
       to cycle through every visual state manually.
     </p>
     <div>
@@ -32,9 +34,9 @@
     <p>
       Also confirm: this page's own CSS below (a red border on every
       <code>button</code>) does not leak into the widget's shadow DOM, and
-      the widget's internal <code>.orb</code>/<code>.label</code> classes are
-      not selectable from this page (open devtools,
-      <code>document.querySelector('.orb')</code> should return
+      the widget's internal <code>.visualizer</code>/<code>.ring</code>/<code>.label</code>
+      classes are not selectable from this page (open devtools,
+      <code>document.querySelector('.visualizer')</code> should return
       <code>null</code>).
     </p>
     <style>
@@ -43,9 +45,81 @@
       }
     </style>
 
+    <h2>Visualizer amplitude (no gateway or LiveKit room needed)</h2>
+    <p>
+      <code>connecting</code>/<code>listening</code>/<code>speaking</code>
+      already animate with no audio at all (the synthetic-motion fallback —
+      also the real production behavior whenever an analyser is
+      unavailable). Use these controls to drive the ring with real
+      amplitude instead, and to check things a live call makes hard to
+      isolate.
+    </p>
+    <p>
+      <label>
+        synthetic amplitude
+        <input
+          type="range"
+          min="0"
+          max="100"
+          value="0"
+          oninput="widget().setSyntheticAudioLevel(this.value / 100)"
+        />
+      </label>
+    </p>
+    <div>
+      <button onclick="startSpeechSim()">simulate speech</button>
+      <button onclick="stopSpeechSim()">stop / release</button>
+      <button onclick="toggleDarkPage()">toggle dark page background</button>
+    </div>
+    <ul>
+      <li>
+        <code>idle</code> and <code>error</code> must be
+        <strong>fully static</strong> apart from the CSS breathe/dim — open
+        the Performance panel, record 3s at idle, and confirm
+        <em>zero</em> scripting.
+      </li>
+      <li>Tab to the widget: the focus ring must be clearly visible on the dark disc, then tab through mic → chat → leave.</li>
+      <li>
+        DevTools &gt; Rendering &gt; "Emulate prefers-reduced-motion: reduce",
+        then click through all five states: no rotation, no sweep, no bar
+        movement.
+      </li>
+      <li>Toggle the dark page background: bars must stay legible in every state (idle grey is the tightest).</li>
+      <li>Click "connecting" and leave it: the sweep must keep running smoothly for the full 8s dispatch window.</li>
+      <li>
+        Switch to another browser tab for 30s and come back: the ring must
+        resume cleanly, with no catch-up burst and no frozen frame.
+      </li>
+    </ul>
+    <script>
+      let simId = null;
+      function startSpeechSim() {
+        stopSpeechSim();
+        widget().setState("speaking");
+        let t = 0;
+        simId = setInterval(() => {
+          t += 0.08;
+          // Word rhythm × syllable wobble — closer to speech than a plain
+          // sine, which is what actually exposes a too-slow release
+          // constant in the sampler's attack/release smoothing.
+          const v = Math.max(0, Math.sin(t * 2.1)) * (0.55 + 0.45 * Math.sin(t * 11));
+          widget().setSyntheticAudioLevel(Math.min(1, Math.abs(v)));
+        }, 50);
+      }
+      function stopSpeechSim() {
+        if (simId) clearInterval(simId);
+        simId = null;
+        widget().setSyntheticAudioLevel(null);
+      }
+      function toggleDarkPage() {
+        document.body.style.background = document.body.style.background ? "" : "#0b0f19";
+        document.body.style.color = document.body.style.color ? "" : "#e5e7eb";
+      }
+    </script>
+
     <h2>Real connection test (Session 2)</h2>
     <p>
-      Clicking the orb itself now calls a real running gateway at
+      Clicking the visualizer button itself now calls a real running gateway at
       <code>http://localhost:8080</code>. This requires: the gateway running
       locally, a tenant named <code>acme</code> that's <code>published</code>
       with <code>allowed_origin</code> matching whatever origin serves this
@@ -58,6 +132,16 @@
       call and the DevTools console for any connection errors.
     </p>
 
+    <!--
+      Local fixture: gateway-url is explicit because a local `npm run build`
+      bakes in no default. A released build carries the production gateway, so
+      a real embed is just:
+
+        <script type="module" src="https://YOUR_CDN/v1/maneki-widget.js"></script>
+        <maneki-widget site-id="acme"></maneki-widget>
+
+      See README.md.
+    -->
     <maneki-widget site-id="acme" gateway-url="http://localhost:8080"></maneki-widget>
 
     <script type="module" src="../dist/maneki-widget.js"></script>
