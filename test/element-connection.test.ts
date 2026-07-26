@@ -268,12 +268,16 @@ describe("data-channel message dispatch", () => {
     return { el, handlers };
   }
 
-  it("routes a navigate message to handleNavigate with the target", async () => {
+  it("routes a navigate message to handleNavigate with the target and a cross-page delay", async () => {
     const { handlers } = await connectAndCaptureHandlers();
 
     handlers.onDataMessage({ type: "navigate", target: "#pricing" });
 
-    expect(mockHandleNavigate).toHaveBeenCalledWith("#pricing");
+    // The delay buffers a cross-page move so an in-flight TTS clause has a
+    // moment to finish (navigate can fire mid-sentence) — same-page scrolls
+    // ignore it entirely (see navigation.test.ts), so passing it here is
+    // harmless either way.
+    expect(mockHandleNavigate).toHaveBeenCalledWith("#pricing", { crossPageDelayMs: 1500 });
   });
 
   it("ignores a navigate message with a non-string target rather than throwing", async () => {
@@ -307,6 +311,44 @@ describe("data-channel message dispatch", () => {
     handlers.onDataMessage({ type: "interrupt" });
 
     expect(el.state).toBe("listening");
+  });
+
+  it("an interrupt cancels a still-pending cross-page navigate", async () => {
+    // A barge-in landing inside handleNavigate's crossPageDelayMs window
+    // means the visitor interrupted the agent right as it announced the
+    // move — the page-move must not go on to fire after that.
+    const cancel = vi.fn();
+    mockHandleNavigate.mockReturnValueOnce(cancel);
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "navigate", target: "https://acme.example.com/faq" });
+    handlers.onDataMessage({ type: "interrupt" });
+
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("an interrupt is a no-op when handleNavigate returned nothing to cancel", async () => {
+    // Same-page scrolls and refused targets return undefined (see
+    // navigation.test.ts) — nothing pending, so interrupt must not throw.
+    mockHandleNavigate.mockReturnValueOnce(undefined);
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "navigate", target: "#pricing" });
+
+    expect(() => handlers.onDataMessage({ type: "interrupt" })).not.toThrow();
+  });
+
+  it("a second interrupt after a navigate already cancelled is still a no-op", async () => {
+    const cancel = vi.fn();
+    mockHandleNavigate.mockReturnValueOnce(cancel);
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "navigate", target: "https://acme.example.com/faq" });
+    handlers.onDataMessage({ type: "interrupt" });
+    handlers.onDataMessage({ type: "interrupt" });
+
+    // Cancelled exactly once, not once per interrupt.
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   extractAnchorId,
   handleNavigate,
@@ -116,6 +116,103 @@ describe("handleNavigate", () => {
     handleNavigate("#pricing", { win: fakeWin("https://acme.example.com/page"), doc: document, storage });
 
     expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+  });
+
+  describe("crossPageDelayMs", () => {
+    // Only the cross-page branch buffers — a navigate can fire mid-sentence
+    // (voice_runtime's navigation_min_spoken_chars), and without this the
+    // page would unload before the in-flight TTS clause finishes playing.
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("defers the pending-navigation flag and location.href assignment", () => {
+      const win = fakeWin("https://acme.example.com/pricing");
+      const storage = fakeStorage();
+
+      handleNavigate("https://acme.example.com/faq#refunds", {
+        win,
+        doc: document,
+        storage,
+        crossPageDelayMs: 1500,
+      });
+
+      // Not yet — still buffered.
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+      expect(win.location.href).toBe("https://acme.example.com/pricing");
+
+      vi.advanceTimersByTime(1500);
+
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBe("1");
+      expect(win.location.href).toBe("https://acme.example.com/faq#refunds");
+    });
+
+    it("returns a cancel callback that prevents the buffered navigation from ever firing", () => {
+      const win = fakeWin("https://acme.example.com/pricing");
+      const storage = fakeStorage();
+
+      const cancel = handleNavigate("https://acme.example.com/faq#refunds", {
+        win,
+        doc: document,
+        storage,
+        crossPageDelayMs: 1500,
+      });
+      expect(cancel).toBeTypeOf("function");
+      cancel?.();
+
+      vi.advanceTimersByTime(5000);
+
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+      expect(win.location.href).toBe("https://acme.example.com/pricing");
+    });
+
+    it("omitting the option keeps today's synchronous, immediate behavior", () => {
+      const win = fakeWin("https://acme.example.com/pricing");
+      const storage = fakeStorage();
+
+      const cancel = handleNavigate("https://acme.example.com/faq#refunds", { win, doc: document, storage });
+
+      expect(cancel).toBeUndefined();
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBe("1");
+      expect(win.location.href).toBe("https://acme.example.com/faq#refunds");
+    });
+
+    it("a same-page target never buffers even when crossPageDelayMs is set", () => {
+      const el = document.createElement("div");
+      el.id = "pricing";
+      el.scrollIntoView = vi.fn();
+      document.body.appendChild(el);
+
+      const cancel = handleNavigate("#pricing", {
+        win: fakeWin("https://acme.example.com/page"),
+        doc: document,
+        crossPageDelayMs: 1500,
+      });
+
+      expect(cancel).toBeUndefined();
+      expect(el.scrollIntoView).toHaveBeenCalled();
+    });
+
+    it("a refused (untrusted) target never buffers either", () => {
+      const win = fakeWin("https://acme.example.com/pricing");
+      const storage = fakeStorage();
+
+      const cancel = handleNavigate("javascript:alert(1)", {
+        win,
+        doc: document,
+        storage,
+        crossPageDelayMs: 1500,
+      });
+
+      expect(cancel).toBeUndefined();
+      vi.advanceTimersByTime(5000);
+      expect(storage._data[PENDING_NAVIGATION_KEY]).toBeUndefined();
+      expect(win.location.href).toBe("https://acme.example.com/pricing");
+    });
   });
 
   describe("untrusted targets", () => {

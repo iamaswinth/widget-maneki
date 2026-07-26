@@ -41,6 +41,15 @@ const DISPATCH_TIMEOUT_MS = 8000;
 // tap) before silently disarming itself.
 const HANGUP_REVERT_MS = 3000;
 
+// How long to buffer a cross-page navigate before actually moving the page
+// (see navigation.ts's crossPageDelayMs) — the navigate event can fire
+// mid-sentence (voice_runtime's navigation_min_spoken_chars), so without
+// this the page would unload before the in-flight TTS clause finishes
+// playing, audibly cutting the agent off. A heuristic buffer for a short
+// spoken clause, not a measurement of actual playout completion — tune if
+// it proves too short/long in practice.
+const CROSS_PAGE_NAVIGATE_DELAY_MS = 1500;
+
 const STYLE = `
   :host {
     all: initial;
@@ -232,6 +241,10 @@ export class ManekiWidgetElement extends HTMLElement {
   private connection: LiveKitConnection | null = null;
   private errorMessage: string | null = null;
   private dispatchTimeoutId: ReturnType<typeof setTimeout> | null = null;
+  // Cancels a cross-page navigate still buffered inside its
+  // CROSS_PAGE_NAVIGATE_DELAY_MS window — see handleDataMessage's
+  // "interrupt" case, which aborts it if a barge-in lands before it fires.
+  private pendingNavigateCancel: (() => void) | null = null;
   private reconnectAttempted = false;
   private hangupArmed = false;
   private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -382,6 +395,8 @@ export class ManekiWidgetElement extends HTMLElement {
     this.unsubscribe?.();
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
+    this.pendingNavigateCancel?.();
+    this.pendingNavigateCancel = null;
     void this.connection?.disconnect();
   }
 
@@ -456,6 +471,10 @@ export class ManekiWidgetElement extends HTMLElement {
   private async endCall(): Promise<void> {
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
+    // A visitor who explicitly hangs up shouldn't have the page yanked out
+    // from under them a moment later by a navigate that was still buffered.
+    this.pendingNavigateCancel?.();
+    this.pendingNavigateCancel = null;
     await this.connection?.disconnect();
     this.connection = null;
     this.reconnectAttempted = false;
@@ -639,9 +658,23 @@ export class ManekiWidgetElement extends HTMLElement {
   private handleDataMessage(message: DataMessage): void {
     switch (message.type) {
       case "navigate":
-        if (typeof message.target === "string") handleNavigate(message.target);
+        if (typeof message.target === "string") {
+          this.pendingNavigateCancel =
+            handleNavigate(message.target, { crossPageDelayMs: CROSS_PAGE_NAVIGATE_DELAY_MS }) ?? null;
+        }
         break;
       case "interrupt":
+        // A barge-in that lands inside a still-buffered cross-page
+        // navigate's delay window means the visitor interrupted the agent
+        // right as it announced the move — cancel the pending page-move
+        // rather than navigating them away from a section they just cut the
+        // agent off about. A navigate that already committed (delay
+        // elapsed, or a same-page scroll which never buffers at all) isn't
+        // retracted — there's nothing left to cancel by then.
+        if (this.pendingNavigateCancel) {
+          this.pendingNavigateCancel();
+          this.pendingNavigateCancel = null;
+        }
         // Immediate visual confirmation the interruption registered, ahead
         // of any new audio — the backend's own barge-in handling is what
         // actually stops playback (see voice_runtime/agent.py).

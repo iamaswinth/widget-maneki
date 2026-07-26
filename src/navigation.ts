@@ -39,6 +39,17 @@ export interface HandleNavigateOptions {
   win?: Window;
   doc?: Document;
   storage?: Storage;
+  /** How long to wait, in ms, before actually assigning location.href for a
+   * cross-page target — default 0 (today's synchronous, immediate
+   * behavior; every existing call site/test that omits this keeps working
+   * unchanged). The navigate event can fire mid-sentence (see
+   * voice_runtime's navigation_min_spoken_chars) so the page would
+   * otherwise unload before the in-flight TTS clause finishes playing,
+   * audibly cutting the agent off. A positive value buffers just the page
+   * move — not the underlying decision — to give that clause a moment to
+   * finish. Only applies to the cross-page branch; a same-page anchor
+   * scroll doesn't tear down the connection, so it always stays instant. */
+  crossPageDelayMs?: number;
 }
 
 /** Resolves a cross-page target to the URL we're willing to send a visitor
@@ -76,33 +87,56 @@ export function resolveNavigationTarget(target: string, currentUrl: URL): URL | 
  * same-page anchor, or a real cross-page load (marking a pending-resume
  * flag first — see Session 4 — since the WebRTC connection can't survive
  * page unload). Cross-page text-fragment handling is deliberately left to
- * the browser's own native behavior on the next page's load. */
-export function handleNavigate(target: string, options: HandleNavigateOptions = {}): void {
+ * the browser's own native behavior on the next page's load.
+ *
+ * Returns a cancel callback when a cross-page navigation was scheduled with
+ * `crossPageDelayMs` (so a caller can abort it — e.g. element.ts cancels on
+ * an "interrupt" event that lands before the delay elapses), or `undefined`
+ * for the same-page/refused/immediate cases, where there's nothing pending
+ * to cancel. */
+export function handleNavigate(
+  target: string,
+  options: HandleNavigateOptions = {}
+): (() => void) | undefined {
   const win = options.win ?? window;
   const doc = options.doc ?? document;
   const storage = options.storage ?? window.sessionStorage;
+  const crossPageDelayMs = options.crossPageDelayMs ?? 0;
 
   const currentUrl = new URL(win.location.href);
 
   if (isSamePageTarget(target, currentUrl)) {
     const id = extractAnchorId(target);
-    if (!id) return;
+    if (!id) return undefined;
     const el = doc.getElementById(id);
-    if (!el) return;
+    if (!el) return undefined;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     highlightElement(el, doc);
-    return;
+    return undefined;
   }
 
   const destination = resolveNavigationTarget(target, currentUrl);
   if (!destination) {
     console.error("<maneki-widget> refusing to navigate to an untrusted target:", target);
-    return;
+    return undefined;
   }
 
-  // Only set after the target is known-good — a refused navigation must not
-  // leave the flag behind, or the next page load would auto-reconnect on the
-  // strength of a navigation that never happened.
-  storage.setItem(PENDING_NAVIGATION_KEY, "1");
-  win.location.href = destination.href;
+  const commit = (): void => {
+    // Only set after the target is known-good — a refused navigation must
+    // not leave the flag behind, or the next page load would auto-reconnect
+    // on the strength of a navigation that never happened.
+    storage.setItem(PENDING_NAVIGATION_KEY, "1");
+    win.location.href = destination.href;
+  };
+
+  if (crossPageDelayMs <= 0) {
+    commit();
+    return undefined;
+  }
+
+  // Global timer functions, not win.setTimeout — the fake `win` objects this
+  // module's own tests (and callers not opting into a delay) pass around are
+  // bare { location } stand-ins with no timer methods of their own.
+  const timerId = setTimeout(commit, crossPageDelayMs);
+  return () => clearTimeout(timerId);
 }
