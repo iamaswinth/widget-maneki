@@ -7,7 +7,7 @@ import {
   DataMessage,
   LiveKitConnection,
 } from "./livekit-connection";
-import { handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
+import { handleClick, handleNavigate, PENDING_NAVIGATION_KEY } from "./navigation";
 import { DEFAULT_BAR_COUNT, createRadialVisualizer, type RadialVisualizer } from "./radial-visualizer";
 import { readGrant, storeGrant } from "./session";
 import { WidgetState, WidgetStateMachine } from "./state";
@@ -241,10 +241,14 @@ export class ManekiWidgetElement extends HTMLElement {
   private connection: LiveKitConnection | null = null;
   private errorMessage: string | null = null;
   private dispatchTimeoutId: ReturnType<typeof setTimeout> | null = null;
-  // Cancels a cross-page navigate still buffered inside its
+  // Cancels a cross-page navigate or click still buffered inside its
   // CROSS_PAGE_NAVIGATE_DELAY_MS window — see handleDataMessage's
   // "interrupt" case, which aborts it if a barge-in lands before it fires.
-  private pendingNavigateCancel: (() => void) | null = null;
+  // One field, not two: only one cross-page page-action is ever pending at
+  // a time, and both "navigate" and "click" fall through to the same
+  // handleNavigate on refusal/no-match, so a single cancel contract covers
+  // both without replicating it.
+  private pendingPageActionCancel: (() => void) | null = null;
   private reconnectAttempted = false;
   private hangupArmed = false;
   private hangupRevertTimerId: ReturnType<typeof setTimeout> | null = null;
@@ -395,8 +399,7 @@ export class ManekiWidgetElement extends HTMLElement {
     this.unsubscribe?.();
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
-    this.pendingNavigateCancel?.();
-    this.pendingNavigateCancel = null;
+    this.cancelPendingPageAction();
     void this.connection?.disconnect();
   }
 
@@ -472,9 +475,8 @@ export class ManekiWidgetElement extends HTMLElement {
     this.clearDispatchTimeout();
     this.clearHangupRevertTimer();
     // A visitor who explicitly hangs up shouldn't have the page yanked out
-    // from under them a moment later by a navigate that was still buffered.
-    this.pendingNavigateCancel?.();
-    this.pendingNavigateCancel = null;
+    // from under them a moment later by a navigate/click that was still buffered.
+    this.cancelPendingPageAction();
     await this.connection?.disconnect();
     this.connection = null;
     this.reconnectAttempted = false;
@@ -655,26 +657,44 @@ export class ManekiWidgetElement extends HTMLElement {
     }
   }
 
+  /** Clears whatever cross-page navigate/click is still buffered, calling
+   * its cancel handle first if one is pending — the shared body behind
+   * disconnectedCallback, endCall, the "navigate"/"click" cases (a second
+   * page-action arriving mid-buffer must not leak the first one's timer),
+   * and "interrupt" below. */
+  private cancelPendingPageAction(): void {
+    this.pendingPageActionCancel?.();
+    this.pendingPageActionCancel = null;
+  }
+
   private handleDataMessage(message: DataMessage): void {
     switch (message.type) {
       case "navigate":
         if (typeof message.target === "string") {
-          this.pendingNavigateCancel =
+          this.cancelPendingPageAction();
+          this.pendingPageActionCancel =
             handleNavigate(message.target, { crossPageDelayMs: CROSS_PAGE_NAVIGATE_DELAY_MS }) ?? null;
+        }
+        break;
+      case "click":
+        if (typeof message.target === "string") {
+          this.cancelPendingPageAction();
+          this.pendingPageActionCancel =
+            handleClick(message.target, {
+              crossPageDelayMs: CROSS_PAGE_NAVIGATE_DELAY_MS,
+              linkText: typeof message.link_text === "string" ? message.link_text : undefined,
+            }) ?? null;
         }
         break;
       case "interrupt":
         // A barge-in that lands inside a still-buffered cross-page
-        // navigate's delay window means the visitor interrupted the agent
-        // right as it announced the move — cancel the pending page-move
-        // rather than navigating them away from a section they just cut the
-        // agent off about. A navigate that already committed (delay
-        // elapsed, or a same-page scroll which never buffers at all) isn't
-        // retracted — there's nothing left to cancel by then.
-        if (this.pendingNavigateCancel) {
-          this.pendingNavigateCancel();
-          this.pendingNavigateCancel = null;
-        }
+        // navigate/click's delay window means the visitor interrupted the
+        // agent right as it announced the move — cancel the pending
+        // page-action rather than moving them away from a section they just
+        // cut the agent off about. One already committed (delay elapsed, or
+        // a same-page scroll which never buffers at all) isn't retracted —
+        // there's nothing left to cancel by then.
+        this.cancelPendingPageAction();
         // Immediate visual confirmation the interruption registered, ahead
         // of any new audio — the backend's own barge-in handling is what
         // actually stops playback (see voice_runtime/agent.py).

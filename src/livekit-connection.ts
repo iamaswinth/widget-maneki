@@ -2,8 +2,10 @@ import type { FrequencyProbe } from "./audio-level";
 
 export type RemoteAudioHandler = (element: HTMLMediaElement) => void;
 
-/** plan-v2 §5.4's data-channel protocol: {"type": "navigate", "target": "..."}
- * or {"type": "interrupt"} — see agent.py's _publish_event. */
+/** plan-v2 §5.4's data-channel protocol: {"type": "navigate", "target": "..."},
+ * {"type": "click", "target": "...", "link_text": "..."} (click-based
+ * navigation — voice_runtime/graph/nodes.py::_navigation_event), or
+ * {"type": "interrupt"} — see agent.py's _publish_event. */
 export interface DataMessage {
   type: string;
   [key: string]: unknown;

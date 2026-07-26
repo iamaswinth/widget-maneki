@@ -22,6 +22,7 @@ vi.mock("../src/livekit-connection", () => ({
 }));
 
 const mockHandleNavigate = vi.hoisted(() => vi.fn());
+const mockHandleClick = vi.hoisted(() => vi.fn());
 
 // vitest's jsdom sets pretendToBeVisual: true, so requestAnimationFrame is
 // REAL here, and vi.useFakeTimers() (used below by several tests) fakes it
@@ -35,11 +36,15 @@ const mockRaf = vi.fn().mockReturnValue(RAF_ID);
 const mockCancelRaf = vi.fn();
 
 vi.mock("../src/navigation", async (importOriginal) => {
-  // Only handleNavigate is mocked — PENDING_NAVIGATION_KEY must stay the
-  // real exported value, since element.ts's auto-resume check reads it
-  // directly (see element-resume tests below).
+  // Only handleNavigate/handleClick are mocked — PENDING_NAVIGATION_KEY must
+  // stay the real exported value, since element.ts's auto-resume check reads
+  // it directly (see element-resume tests below).
   const actual = await importOriginal<typeof import("../src/navigation")>();
-  return { ...actual, handleNavigate: (...args: unknown[]) => mockHandleNavigate(...args) };
+  return {
+    ...actual,
+    handleNavigate: (...args: unknown[]) => mockHandleNavigate(...args),
+    handleClick: (...args: unknown[]) => mockHandleClick(...args),
+  };
 });
 
 import "../src/index";
@@ -107,6 +112,7 @@ beforeEach(() => {
   mockRequestWidgetToken.mockReset();
   mockConnectToRoom.mockReset();
   mockHandleNavigate.mockReset();
+  mockHandleClick.mockReset();
   window.sessionStorage.clear();
   // jsdom leaves navigator.mediaDevices undefined; the widget's secure-context
   // guard checks for it before connecting, so stub a getUserMedia here to
@@ -294,6 +300,39 @@ describe("data-channel message dispatch", () => {
     expect(mockHandleNavigate).not.toHaveBeenCalled();
   });
 
+  it("routes a click message to handleClick with the target, link_text, and a cross-page delay", async () => {
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({
+      type: "click",
+      target: "https://acme.example.com/pricing",
+      link_text: "Pricing",
+    });
+
+    expect(mockHandleClick).toHaveBeenCalledWith("https://acme.example.com/pricing", {
+      crossPageDelayMs: 1500,
+      linkText: "Pricing",
+    });
+  });
+
+  it("passes linkText as undefined when link_text is absent or not a string", async () => {
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "click", target: "https://acme.example.com/pricing" });
+
+    expect(mockHandleClick).toHaveBeenCalledWith("https://acme.example.com/pricing", {
+      crossPageDelayMs: 1500,
+      linkText: undefined,
+    });
+  });
+
+  it("ignores a click message with a non-string target rather than throwing", async () => {
+    const { handlers } = await connectAndCaptureHandlers();
+
+    expect(() => handlers.onDataMessage({ type: "click", target: 42 })).not.toThrow();
+    expect(mockHandleClick).not.toHaveBeenCalled();
+  });
+
   it("an interrupt message while speaking switches the visualizer back to listening", async () => {
     const { el, handlers } = await connectAndCaptureHandlers();
     handlers.onRemoteAudio(document.createElement("audio"));
@@ -349,6 +388,36 @@ describe("data-channel message dispatch", () => {
 
     // Cancelled exactly once, not once per interrupt.
     expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("an interrupt cancels a still-pending cross-page click the same way it cancels a navigate", async () => {
+    const cancel = vi.fn();
+    mockHandleClick.mockReturnValueOnce(cancel);
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "click", target: "https://acme.example.com/pricing" });
+    handlers.onDataMessage({ type: "interrupt" });
+
+    expect(cancel).toHaveBeenCalled();
+  });
+
+  it("a second cross-page message cancels the first pending one, regardless of type", async () => {
+    // Previously a second navigate arriving inside the buffer window
+    // overwrote the pending cancel handle without calling it, leaking the
+    // first timer — masked only because the first one always unloaded the
+    // page. Covers both same-type (navigate,navigate) and mixed
+    // (navigate,click) sequences since both now share one field.
+    const firstCancel = vi.fn();
+    const secondCancel = vi.fn();
+    mockHandleNavigate.mockReturnValueOnce(firstCancel);
+    mockHandleClick.mockReturnValueOnce(secondCancel);
+    const { handlers } = await connectAndCaptureHandlers();
+
+    handlers.onDataMessage({ type: "navigate", target: "https://acme.example.com/faq" });
+    handlers.onDataMessage({ type: "click", target: "https://acme.example.com/pricing" });
+
+    expect(firstCancel).toHaveBeenCalledTimes(1);
+    expect(secondCancel).not.toHaveBeenCalled();
   });
 });
 
