@@ -15,6 +15,11 @@ import { WidgetState, WidgetStateMachine } from "./state";
 const STATE_LABELS: Record<WidgetState, string> = {
   idle: "Tap to talk",
   connecting: "Connecting…",
+  // Distinct from "connecting": shown only for an automatic rejoin (right
+  // after the agent's own cross-page navigation, or a dropped-connection
+  // retry) — the visitor already opted into this conversation once, so this
+  // reads as "picking the call back up", not "starting a new one".
+  reconnecting: "Reconnecting…",
   listening: "Listening…",
   speaking: "Speaking…",
   error: "Something went wrong",
@@ -28,6 +33,7 @@ const STATE_LABELS: Record<WidgetState, string> = {
 const STATE_COLORS: Record<WidgetState, string> = {
   idle: "#9ca3af",
   connecting: "#a855f7",
+  reconnecting: "#a855f7",
   listening: "#22c55e",
   speaking: "#3b82f6",
   error: "#ef4444",
@@ -388,7 +394,7 @@ export class ManekiWidgetElement extends HTMLElement {
     if (window.sessionStorage.getItem(PENDING_NAVIGATION_KEY) !== "1") return;
     window.sessionStorage.removeItem(PENDING_NAVIGATION_KEY);
     this.reconnectAttempted = false;
-    void this.attemptConnect();
+    void this.attemptConnect(true);
   }
 
   disconnectedCallback(): void {
@@ -514,7 +520,13 @@ export class ManekiWidgetElement extends HTMLElement {
     await this.connection.sendText(trimmed);
   }
 
-  private async attemptConnect(): Promise<void> {
+  /** `isResume` is purely a label for the visitor — "Reconnecting…" instead
+   * of "Connecting…" — for the two paths that pick an existing conversation
+   * back up without the visitor consciously tapping anything: an automatic
+   * post-navigation rejoin (maybeAutoResume) and a dropped-connection retry
+   * (handleUnexpectedDisconnect). It changes no request behavior: the
+   * gateway resumes the same identity either way, purely from the grant. */
+  private async attemptConnect(isResume = false): Promise<void> {
     const siteId = this.getAttribute("site-id")!;
     // Non-null safe: connectedCallback refused to render without both.
     const gatewayUrl = this.resolveGatewayUrl();
@@ -538,7 +550,7 @@ export class ManekiWidgetElement extends HTMLElement {
       return;
     }
 
-    this.setState("connecting");
+    this.setState(isResume ? "reconnecting" : "connecting");
     try {
       const {
         token,
@@ -567,6 +579,21 @@ export class ManekiWidgetElement extends HTMLElement {
           this.samplers.set(probe.kind, createFrequencySampler(probe.analyser));
         },
       });
+
+      if (isResume) {
+        // Lets the agent update its page_url/page_links without a fresh
+        // job. Only needed on a resume: a genuinely new job already gets
+        // page_url from LiveKit dispatch metadata (the /widget/token
+        // request above), but api-gateway now rejoins a resume into the
+        // SAME room/job, which never re-reads that metadata — see
+        // sendPageChanged's doc comment. Best-effort: a publish failure
+        // here shouldn't fail an otherwise-successful connect.
+        try {
+          await this.connection.sendPageChanged(window.location.href);
+        } catch (err) {
+          console.warn("<maneki-widget> failed to send page_changed:", err);
+        }
+      }
 
       this.setState("listening");
       this.startDispatchTimeout();
@@ -627,7 +654,7 @@ export class ManekiWidgetElement extends HTMLElement {
       return;
     }
     this.reconnectAttempted = true;
-    void this.attemptConnect();
+    void this.attemptConnect(true);
   }
 
   private startDispatchTimeout(): void {
@@ -734,7 +761,10 @@ export class ManekiWidgetElement extends HTMLElement {
    * the remote probe. */
   private syncFrameLoop(state: WidgetState): void {
     const animated =
-      state === "connecting" || state === "speaking" || (state === "listening" && !this.micMuted);
+      state === "connecting" ||
+      state === "reconnecting" ||
+      state === "speaking" ||
+      (state === "listening" && !this.micMuted);
     if (animated && !prefersReducedMotion()) {
       this.startFrameLoop();
     } else {

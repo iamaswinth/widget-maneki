@@ -1,4 +1,4 @@
-export type WidgetState = "idle" | "connecting" | "listening" | "speaking" | "error";
+export type WidgetState = "idle" | "connecting" | "reconnecting" | "listening" | "speaking" | "error";
 
 type Listener = (state: WidgetState, previous: WidgetState) => void;
 

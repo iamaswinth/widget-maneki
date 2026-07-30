@@ -135,7 +135,7 @@ afterEach(() => {
 describe("tap-to-talk orchestration", () => {
   it("goes idle -> connecting -> listening on a successful connection", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     expect(el.state).toBe("idle");
@@ -167,7 +167,7 @@ describe("tap-to-talk orchestration", () => {
     let handlers!: ConnectToRoomHandlers;
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       handlers = h;
-      return { disconnect: vi.fn() };
+      return { disconnect: vi.fn(), sendPageChanged: vi.fn() };
     });
 
     const el = mountWidget();
@@ -190,7 +190,7 @@ describe("tap-to-talk orchestration", () => {
   });
 
   it("ignores a second tap while already connecting", async () => {
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
     let resolveToken!: (value: unknown) => void;
     mockRequestWidgetToken.mockReturnValue(
       new Promise((resolve) => {
@@ -210,7 +210,7 @@ describe("tap-to-talk orchestration", () => {
 
   it("sends no grant on a first visit, then persists the one it gets back", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     click(el);
@@ -227,7 +227,7 @@ describe("tap-to-talk orchestration", () => {
   it("replays the stored grant on a later connect", async () => {
     window.sessionStorage.setItem("maneki_visitor_grant", "grant-from-earlier");
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     click(el);
@@ -243,7 +243,7 @@ describe("tap-to-talk orchestration", () => {
     mockRequestWidgetToken
       .mockRejectedValueOnce(new FakeWidgetTokenError(500, "boom"))
       .mockResolvedValueOnce(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     click(el);
@@ -265,7 +265,7 @@ describe("data-channel message dispatch", () => {
     let handlers!: ConnectToRoomHandlers;
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       handlers = h;
-      return { disconnect: vi.fn() };
+      return { disconnect: vi.fn(), sendPageChanged: vi.fn() };
     });
 
     const el = mountWidget();
@@ -426,7 +426,7 @@ describe("cross-page session resume", () => {
     window.sessionStorage.setItem("maneki_visitor_grant", "grant-existing");
     window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
 
@@ -443,7 +443,7 @@ describe("cross-page session resume", () => {
   it("clears the pending-navigation flag so a later reload doesn't loop-reconnect", async () => {
     window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     await vi.waitFor(() => expect(el.state).toBe("listening"));
@@ -458,6 +458,47 @@ describe("cross-page session resume", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(el.state).toBe("idle");
     expect(mockRequestWidgetToken).not.toHaveBeenCalled();
+  });
+
+  it("shows Reconnecting, not Connecting, during an auto-resume", async () => {
+    window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
+    mockRequestWidgetToken.mockImplementation(
+      () => new Promise((resolve) => setTimeout(() => resolve(TOKEN_RESPONSE), 0))
+    );
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
+
+    const el = mountWidget();
+
+    await vi.waitFor(() => expect(el.state).toBe("reconnecting"));
+    expect(label(el)).toBe("Reconnecting…");
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+  });
+
+  it("tells the agent the current page once an auto-resume lands", async () => {
+    window.sessionStorage.setItem(PENDING_NAVIGATION_KEY, "1");
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockSendPageChanged = vi.fn();
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: mockSendPageChanged });
+
+    const el = mountWidget();
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockSendPageChanged).toHaveBeenCalledWith(window.location.href);
+  });
+
+  it("does not send page_changed on a fresh, non-resume connect", async () => {
+    // A genuinely new job already gets page_url from LiveKit dispatch
+    // metadata (the /widget/token request's page_url field) — sending
+    // page_changed here would be pure noise, not just redundant.
+    mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
+    const mockSendPageChanged = vi.fn();
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: mockSendPageChanged });
+
+    const el = mountWidget();
+    click(el);
+    await vi.waitFor(() => expect(el.state).toBe("listening"));
+
+    expect(mockSendPageChanged).not.toHaveBeenCalled();
   });
 });
 
@@ -524,15 +565,18 @@ describe("error and edge states", () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
     let handlers!: ConnectToRoomHandlers;
     let connectCount = 0;
+    const mockSendPageChanged = vi.fn();
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       connectCount += 1;
       handlers = h;
-      return { disconnect: vi.fn() };
+      return { disconnect: vi.fn(), sendPageChanged: mockSendPageChanged };
     });
 
     const el = mountWidget();
     click(el);
     await vi.waitFor(() => expect(el.state).toBe("listening"));
+    // The very first (non-resume) connect must not have sent it.
+    expect(mockSendPageChanged).not.toHaveBeenCalled();
 
     handlers.onDisconnected();
 
@@ -540,6 +584,9 @@ describe("error and edge states", () => {
     await vi.waitFor(() => expect(el.state).toBe("listening"));
     // Reconnected silently — never surfaced as an error to the visitor.
     expect(el.state).not.toBe("error");
+    // The reconnect itself is a resume — the agent's already-warm job needs
+    // telling, since it never re-reads LiveKit dispatch metadata for this.
+    expect(mockSendPageChanged).toHaveBeenCalledWith(window.location.href);
   });
 
   it("gives up after a second consecutive disconnect and shows a retryable error", async () => {
@@ -547,7 +594,7 @@ describe("error and edge states", () => {
     let handlers!: ConnectToRoomHandlers;
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       handlers = h;
-      return { disconnect: vi.fn() };
+      return { disconnect: vi.fn(), sendPageChanged: vi.fn() };
     });
 
     const el = mountWidget();
@@ -568,7 +615,7 @@ describe("error and edge states", () => {
     let handlers!: ConnectToRoomHandlers;
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       handlers = h;
-      return { disconnect: vi.fn() };
+      return { disconnect: vi.fn(), sendPageChanged: vi.fn() };
     });
 
     const el = mountWidget();
@@ -592,7 +639,7 @@ describe("error and edge states", () => {
     vi.useFakeTimers();
     try {
       mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-      mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+      mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
       const el = mountWidget();
       click(el);
@@ -615,7 +662,7 @@ describe("error and edge states", () => {
       let handlers!: ConnectToRoomHandlers;
       mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
         handlers = h;
-        return { disconnect: vi.fn() };
+        return { disconnect: vi.fn(), sendPageChanged: vi.fn() };
       });
 
       const el = mountWidget();
@@ -736,7 +783,7 @@ describe("text input toggle", () => {
 
   it("stays revealed across a state transition instead of collapsing on connect", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     revealTextInput(el);
@@ -756,7 +803,7 @@ describe("hangup", () => {
 
   it("shows the hangup button once listening", async () => {
     mockRequestWidgetToken.mockResolvedValue(TOKEN_RESPONSE);
-    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn() });
+    mockConnectToRoom.mockResolvedValue({ disconnect: vi.fn(), sendPageChanged: vi.fn() });
 
     const el = mountWidget();
     click(el);
@@ -847,7 +894,7 @@ describe("hangup", () => {
     let handlers!: ConnectToRoomHandlers;
     mockConnectToRoom.mockImplementation(async (_url: string, _token: string, h: ConnectToRoomHandlers) => {
       handlers = h;
-      return { disconnect: vi.fn().mockResolvedValue(undefined) };
+      return { disconnect: vi.fn().mockResolvedValue(undefined), sendPageChanged: vi.fn() };
     });
 
     const el = mountWidget();

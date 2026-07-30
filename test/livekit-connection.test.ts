@@ -6,6 +6,7 @@ const mockDisconnect = vi.fn().mockResolvedValue(undefined);
 const mockSetMicrophoneEnabled = vi.fn().mockResolvedValue(undefined);
 const mockStartAudio = vi.fn().mockResolvedValue(undefined);
 const mockSendText = vi.fn().mockResolvedValue(undefined);
+const mockPublishData = vi.fn().mockResolvedValue(undefined);
 const mockCreateAudioAnalyser = vi.fn();
 
 class FakeRoom {
@@ -13,7 +14,11 @@ class FakeRoom {
   connect = mockConnect;
   disconnect = mockDisconnect;
   startAudio = mockStartAudio;
-  localParticipant = { setMicrophoneEnabled: mockSetMicrophoneEnabled, sendText: mockSendText };
+  localParticipant = {
+    setMicrophoneEnabled: mockSetMicrophoneEnabled,
+    sendText: mockSendText,
+    publishData: mockPublishData,
+  };
 }
 
 // Intercepts both the static type-only import in livekit-connection.ts and
@@ -66,6 +71,7 @@ beforeEach(() => {
   mockSetMicrophoneEnabled.mockResolvedValue(undefined);
   mockStartAudio.mockClear();
   mockSendText.mockClear();
+  mockPublishData.mockClear();
   mockCreateAudioAnalyser.mockReset();
 });
 
@@ -244,6 +250,22 @@ describe("connectToRoom", () => {
       await connection.sendText("how much does it cost?");
 
       expect(mockSendText).toHaveBeenCalledWith("how much does it cost?", { topic: "lk.chat" });
+    });
+  });
+
+  describe("sendPageChanged", () => {
+    it("publishes a reliable page_changed message with the current page URL", async () => {
+      const connection = await connectToRoom("wss://lk.example.com", "jwt-abc", handlers());
+
+      await connection.sendPageChanged("https://acme.example.com/pricing");
+
+      expect(mockPublishData).toHaveBeenCalledTimes(1);
+      const [payload, options] = mockPublishData.mock.calls[0];
+      expect(JSON.parse(new TextDecoder().decode(payload as Uint8Array))).toEqual({
+        type: "page_changed",
+        page_url: "https://acme.example.com/pricing",
+      });
+      expect(options).toEqual({ reliable: true });
     });
   });
 

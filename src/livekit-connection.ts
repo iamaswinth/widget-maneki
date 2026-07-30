@@ -67,6 +67,16 @@ export interface LiveKitConnection {
    * room call rejects; callers are expected to catch and ignore transient
    * failures the same way any other mid-call operation might. */
   setMicrophoneEnabled(enabled: boolean): Promise<void>;
+  /** Tells the agent which page this participant is now on — for a resumed
+   * connection only (see element.ts's attemptConnect(isResume)). The
+   * room-name change that used to accompany every navigation (a fresh room
+   * per /widget/token call) is gone: api-gateway now names the room
+   * deterministically from session_id, so a cross-page navigation or a
+   * dropped-connection reconnect rejoins the SAME room and the SAME
+   * already-warm agent job, which never reads a fresh page_url from LiveKit
+   * job dispatch metadata the way a genuinely new job would (see
+   * voice_runtime/agent.py's _apply_page_changed). */
+  sendPageChanged(pageUrl: string): Promise<void>;
 }
 
 /** The only place `livekit-client` is imported — a dynamic import, so it's
@@ -199,6 +209,12 @@ export async function connectToRoom(
     },
     setMicrophoneEnabled: async (enabled: boolean) => {
       await room.localParticipant.setMicrophoneEnabled(enabled);
+    },
+    sendPageChanged: async (pageUrl: string) => {
+      const payload = JSON.stringify({ type: "page_changed", page_url: pageUrl });
+      await room.localParticipant.publishData(new TextEncoder().encode(payload), {
+        reliable: true,
+      });
     },
   };
 }
